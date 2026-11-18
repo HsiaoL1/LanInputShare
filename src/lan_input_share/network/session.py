@@ -41,9 +41,7 @@ type AuthenticationDecision = bool | CloseReason
 type Authenticator = Callable[
     [DeviceInfo], AuthenticationDecision | Awaitable[AuthenticationDecision]
 ]
-type CertificateAuthenticator = Callable[
-    [DeviceInfo, bytes], bool | Awaitable[bool]
-]
+type CertificateAuthenticator = Callable[[DeviceInfo, bytes], bool | Awaitable[bool]]
 type CertificateApprover = Callable[[DeviceInfo, bytes], None | Awaitable[None]]
 type ChallengeSigner = Callable[[bytes], bytes]
 
@@ -114,9 +112,7 @@ class ControlSession:
             part is not None for part in secure_parts
         ):
             raise ValueError("证书认证必须同时配置本机证书、信任校验和挑战签名器")
-        if certificate_approver is not None and not all(
-            part is not None for part in secure_parts
-        ):
+        if certificate_approver is not None and not all(part is not None for part in secure_parts):
             raise ValueError("证书认证必须同时配置本机证书、信任校验和挑战签名器")
         self._transport = transport
         self._local_device = local_device
@@ -126,9 +122,7 @@ class ControlSession:
         self._certificate_approver = certificate_approver
         self._challenge_signer = challenge_signer
         channel_binding_method = getattr(transport, "channel_binding", None)
-        channel_binding = (
-            channel_binding_method() if callable(channel_binding_method) else None
-        )
+        channel_binding = channel_binding_method() if callable(channel_binding_method) else None
         self._channel_binding = channel_binding if isinstance(channel_binding, bytes) else None
         if challenge_signer is not None and not self._channel_binding:
             raise ValueError("证书认证要求已建立 TLS 通道绑定")
@@ -176,11 +170,10 @@ class ControlSession:
             "role": self._local_device.role.value,
             "screen_width": self._local_device.screen.width,
             "screen_height": self._local_device.screen.height,
+            "platform": self._local_device.platform,
         }
         if self._local_certificate_der is not None:
-            payload["certificate"] = base64.b64encode(
-                self._local_certificate_der
-            ).decode("ascii")
+            payload["certificate"] = base64.b64encode(self._local_certificate_der).decode("ascii")
         await self._send_internal(
             HelloMessage(
                 self.session_id,
@@ -241,9 +234,8 @@ class ControlSession:
                     )
                     if isinstance(message, HelloMessage):
                         hello_seen = True
-                    if (
-                        not handshake_message
-                        and (self._state is not SessionState.ACTIVE or hello_seen)
+                    if not handshake_message and (
+                        self._state is not SessionState.ACTIVE or hello_seen
                     ):
                         continue
                     await self._handle_message(message)
@@ -293,6 +285,7 @@ class ControlSession:
                     _required_int(message.payload.get("screen_width")),
                     _required_int(message.payload.get("screen_height")),
                 ),
+                platform=_required_string(message.payload.get("platform", "win32")),
             )
         except (ValueError, TypeError):
             await self.close(CloseReason.PROTOCOL_ERROR)
@@ -302,9 +295,7 @@ class ControlSession:
         raw_certificate = message.payload.get("certificate")
         if isinstance(raw_certificate, str):
             try:
-                self._peer_certificate_der = base64.b64decode(
-                    raw_certificate, validate=True
-                )
+                self._peer_certificate_der = base64.b64decode(raw_certificate, validate=True)
             except ValueError:
                 await self.close(CloseReason.PROTOCOL_ERROR)
                 return
@@ -360,11 +351,7 @@ class ControlSession:
                 AuthChallengeMessage(
                     self.session_id,
                     self._next_sequence(),
-                    {
-                        "challenge": base64.b64encode(
-                            self._outstanding_challenge
-                        ).decode("ascii")
-                    },
+                    {"challenge": base64.b64encode(self._outstanding_challenge).decode("ascii")},
                 )
             )
             return

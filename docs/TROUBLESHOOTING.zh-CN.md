@@ -95,8 +95,8 @@ Windows 禁止普通权限进程向更高权限窗口注入输入。因此：
 
 ## 已知限制
 
-- 仅支持 Windows 10/11 64 位；
-- 暂不支持 macOS、Linux；
+- 支持 Windows 10/11 64 位与 macOS 13+；macOS 实机验收状态见 [Mac 使用说明](MACOS.zh-CN.md)；
+- 暂不支持 Linux；macOS 的 Secure Input 下可能无法监听输入；
 - 最多三台电脑，一台主控和两台客户端；
 - 每台电脑只支持一个显示器；
 - 只支持同一局域网，不提供公网中转；

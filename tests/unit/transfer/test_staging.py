@@ -77,11 +77,15 @@ def test_cleanup_orphans_ignores_directory_resolving_outside_staging(
     root.mkdir()
     outside.mkdir()
     redirected = root / "redirected"
-    subprocess.run(
-        ["cmd", "/c", "mklink", "/J", str(redirected), str(outside)],
-        check=True,
-        capture_output=True,
-    )
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(redirected), str(outside)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        redirected.symlink_to(outside, target_is_directory=True)
+    os.utime(outside, (1_000.0, 1_000.0))
     area = StagingArea(root, retention_seconds=100)
 
     removed = area.cleanup_orphans(now=1_200.0)

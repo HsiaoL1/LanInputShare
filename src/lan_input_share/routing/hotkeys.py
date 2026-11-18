@@ -21,19 +21,24 @@ class HotkeyAction(StrEnum):
 
 class HotkeyMatcher:
     def __init__(self) -> None:
-        self._pressed: set[int] = set()
+        self._pressed: dict[tuple[int, int, bool], int] = {}
         self._fired: set[int] = set()
 
     def feed(self, event: KeyEvent) -> HotkeyAction | None:
         key = event.virtual_key
+        canonical = {0xA2: _VK_CONTROL, 0xA3: _VK_CONTROL, 0xA4: _VK_ALT, 0xA5: _VK_ALT}.get(
+            key, key
+        )
+        identity = (event.scan_code, key, event.is_extended)
         if not event.is_down:
-            self._pressed.discard(key)
+            self._pressed.pop(identity, None)
             self._fired.discard(key)
             return None
-        self._pressed.add(key)
+        self._pressed[identity] = canonical
         if key in self._fired:
             return None
-        if _VK_CONTROL not in self._pressed or _VK_ALT not in self._pressed:
+        pressed = self._pressed.values()
+        if _VK_CONTROL not in pressed or _VK_ALT not in pressed:
             return None
         actions = {
             _VK_1: HotkeyAction.SELECT_DEVICE_1,

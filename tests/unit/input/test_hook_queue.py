@@ -76,8 +76,7 @@ def test_release_for_input_pressed_locally_passes_through_after_remote_switch() 
 
     assert hook.dispatch_for_test(KeyEvent(29, 0x11, True)) is Suppression.PASS_THROUGH
     assert (
-        hook.dispatch_for_test(MouseButtonEvent(MouseButton.LEFT, True))
-        is Suppression.PASS_THROUGH
+        hook.dispatch_for_test(MouseButtonEvent(MouseButton.LEFT, True)) is Suppression.PASS_THROUGH
     )
     hook.set_remote_active(True)
 
@@ -98,3 +97,31 @@ def test_explicit_local_suppression_can_intercept_cross_device_paste() -> None:
     assert hook.dispatch_for_test(KeyEvent(47, 0x56, True)) is Suppression.SUPPRESS
     assert hook.remote_active is False
     hook.stop()
+
+
+def test_native_sided_modifiers_trigger_emergency_return() -> None:
+    hook = Win32InputHook(install_native=False)
+    hook.start(lambda _event: Suppression.SUPPRESS)
+    hook.set_remote_active(True)
+    try:
+        hook.dispatch_for_test(KeyEvent(29, 0xA3, True, is_extended=True))
+        hook.dispatch_for_test(KeyEvent(56, 0xA4, True))
+        assert hook.dispatch_for_test(KeyEvent(1, 0x1B, True)) is Suppression.PASS_THROUGH
+        assert not hook.remote_active
+    finally:
+        hook.stop()
+
+
+def test_release_of_one_control_side_keeps_other_side_for_emergency_return() -> None:
+    hook = Win32InputHook(install_native=False)
+    hook.start(lambda _event: Suppression.SUPPRESS)
+    hook.set_remote_active(True)
+    try:
+        hook.dispatch_for_test(KeyEvent(29, 0x11, True))
+        hook.dispatch_for_test(KeyEvent(29, 0x11, True, is_extended=True))
+        hook.dispatch_for_test(KeyEvent(29, 0x11, False))
+        hook.dispatch_for_test(KeyEvent(56, 0x12, True))
+        assert hook.dispatch_for_test(KeyEvent(1, 0x1B, True)) is Suppression.PASS_THROUGH
+        assert not hook.remote_active
+    finally:
+        hook.stop()

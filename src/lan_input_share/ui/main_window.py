@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QCloseEvent
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtGui import QCloseEvent, QDesktopServices
 from PySide6.QtWidgets import (
     QComboBox,
     QFormLayout,
@@ -47,6 +48,27 @@ class MainWindow(QMainWindow):
         root = QWidget(self)
         layout = QVBoxLayout(root)
 
+        if sys.platform == "darwin":
+            permissions = QLabel(
+                "Mac 需要允许辅助功能；作为主控还需允许输入监控。\n"
+                "在系统设置 → 隐私与安全性中开启权限后，退出并重新打开程序。"
+            )
+            permissions.setWordWrap(True)
+            layout.addWidget(permissions)
+            permission_buttons = QHBoxLayout()
+            for title, pane in (
+                ("辅助功能设置", "Privacy_Accessibility"),
+                ("输入监控设置", "Privacy_ListenEvent"),
+            ):
+                button = QPushButton(title)
+                button.clicked.connect(
+                    lambda _checked=False, p=pane: QDesktopServices.openUrl(
+                        QUrl(f"x-apple.systempreferences:com.apple.preference.security?{p}")
+                    )
+                )
+                permission_buttons.addWidget(button)
+            layout.addLayout(permission_buttons)
+
         settings = QGroupBox("本机设置")
         form = QFormLayout(settings)
         self.name_edit = QLineEdit()
@@ -74,9 +96,7 @@ class MainWindow(QMainWindow):
         self.client_settings_box = QGroupBox("客户端监听")
         client_layout = QFormLayout(self.client_settings_box)
         self.client_port_label = QLabel("24870")
-        self.bound_controller_label = QLabel(
-            "已信任主控可自动连接；新主控首次连接时将在本机确认"
-        )
+        self.bound_controller_label = QLabel("已信任主控可自动连接；新主控首次连接时将在本机确认")
         self.bound_controller_label.setWordWrap(True)
         client_layout.addRow("监听端口", self.client_port_label)
         client_layout.addRow("连接确认", self.bound_controller_label)
@@ -119,9 +139,7 @@ class MainWindow(QMainWindow):
         self.cross_editor.layout_changed.connect(self._cross_layout_changed)
         self.cross_editor.peer_moved.connect(view_model.apply_layout_immediately)
         self.cross_editor.validation_failed.connect(
-            lambda message: QMessageBox.warning(
-                self, "屏幕排列无效", message
-            )
+            lambda message: QMessageBox.warning(self, "屏幕排列无效", message)
         )
         self.start_button.clicked.connect(view_model.apply_settings)
         diagnostics.clicked.connect(view_model.request_diagnostics)
@@ -203,15 +221,12 @@ class MainWindow(QMainWindow):
             f"设备：{value.device_name}\n证书指纹：{value.short_fingerprint}\n\n是否信任？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
-        self._view_model.answer_pairing(
-            value.request_id, answer is QMessageBox.StandardButton.Yes
-        )
+        self._view_model.answer_pairing(value.request_id, answer is QMessageBox.StandardButton.Yes)
 
     def _update_slot(self, value: object) -> None:
         if not isinstance(value, SlotView):
             return
-        self.cross_editor.set_slot_status(
-            value.position, value.device_name, value.status
-        )
+        self.cross_editor.set_slot_status(value.position, value.device_name, value.status)
+
 
 __all__ = ["MainWindow"]

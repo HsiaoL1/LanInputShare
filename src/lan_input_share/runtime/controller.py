@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from dataclasses import replace
 from typing import Protocol
 
 from lan_input_share.input.events import (
@@ -16,7 +17,7 @@ from lan_input_share.input.events import (
     Suppression,
 )
 from lan_input_share.input.motion import RemoteMotionAccumulator
-from lan_input_share.input.win32_hook import HookEventQueue
+from lan_input_share.input.queue import HookEventQueue
 from lan_input_share.network.session import (
     Disconnected,
     MessageReceived,
@@ -85,6 +86,8 @@ class ControllerRuntime:
         motion_interval: float = 0.004,
         message_handler: Callable[[str, WireMessage], Awaitable[None]] | None = None,
         paste_handler: Callable[[str], bool] | None = None,
+        local_platform: str = "win32",
+        error_handler: Callable[[str], None] | None = None,
     ) -> None:
         if motion_interval <= 0:
             raise ValueError("鼠标刷新间隔必须为正数")
@@ -104,6 +107,9 @@ class ControllerRuntime:
         self._message_handler = message_handler
         self._paste_handler = paste_handler
         self._control_down = False
+        self._paste_modifiers: set[tuple[int, int, bool]] = set()
+        self._local_platform = local_platform
+        self._error_handler = error_handler or (lambda _message: None)
         self._suppress_paste_key = False
         self._motion = RemoteMotionAccumulator()
         self._motion_interval = motion_interval
@@ -120,9 +126,7 @@ class ControllerRuntime:
             raise ValueError("会话缺少对端设备信息")
         self._sessions[device_id] = session
         if self._started:
-            self._watchers[device_id] = asyncio.create_task(
-                self._watch_session(device_id, session)
-            )
+            self._watchers[device_id] = asyncio.create_task(self._watch_session(device_id, session))
 
     async def detach_session(self, device_id: str) -> None:
         session = self._sessions.get(device_id)
@@ -150,9 +154,7 @@ class ControllerRuntime:
         self._worker = asyncio.create_task(self._input_worker())
         self._hook.start(self._on_hook_event)
         for device_id, session in self._sessions.items():
-            self._watchers[device_id] = asyncio.create_task(
-                self._watch_session(device_id, session)
-            )
+            self._watchers[device_id] = asyncio.create_task(self._watch_session(device_id, session))
 
     async def pause(self) -> None:
         self._paused = True
@@ -188,8 +190,14 @@ class ControllerRuntime:
             return Suppression.PASS_THROUGH
         remote_active = self._routing.active_device_id in self._sessions
         if isinstance(event, KeyEvent):
-            if event.virtual_key in (0x11, 0xA2, 0xA3):
-                self._control_down = event.is_down
+            primary_keys = (0x5B, 0x5C) if self._local_platform == "darwin" else (0x11, 0xA2, 0xA3)
+            if event.virtual_key in primary_keys:
+                identity = (event.scan_code, event.virtual_key, event.is_extended)
+                if event.is_down:
+                    self._paste_modifiers.add(identity)
+                else:
+                    self._paste_modifiers.discard(identity)
+                self._control_down = bool(self._paste_modifiers)
             elif event.virtual_key == 0x56:
                 if event.is_down and self._control_down and self._paste_handler is not None:
                     target_id = self._routing.active_device_id
@@ -223,11 +231,7 @@ class ControllerRuntime:
         wakeup = self._wakeup
         if loop is not None and wakeup is not None:
             loop.call_soon_threadsafe(wakeup.set)
-        return (
-            Suppression.SUPPRESS
-            if remote_active
-            else Suppression.PASS_THROUGH
-        )
+        return Suppression.SUPPRESS if remote_active else Suppression.PASS_THROUGH
 
     async def _input_worker(self) -> None:
         assert self._wakeup is not None
@@ -235,13 +239,32 @@ class ControllerRuntime:
             await self._wakeup.wait()
             self._wakeup.clear()
             events = self._queue.drain()
-            await self._flush_remote_motion(force=bool(events))
-            for event in events:
-                if not isinstance(event, MouseMoveEvent):
-                    await self._flush_remote_motion(force=True)
-                await self._handle_event(event)
-            if self._motion.has_pending():
-                self._wakeup.set()
+            try:
+                await self._flush_remote_motion(force=bool(events))
+                for event in events:
+                    if not isinstance(event, MouseMoveEvent):
+                        await self._flush_remote_motion(force=True)
+                    await self._handle_event(event)
+                if self._motion.has_pending():
+                    self._wakeup.set()
+            except Exception as exc:
+                # A native cursor failure must not leave an active remote route
+                # after its consumer has stopped processing keyboard events.
+                self._paused = True
+                self._hook.set_remote_active(False)
+                self._motion.clear()
+                self._queue.drain()
+                self._paste_modifiers.clear()
+                self._control_down = False
+                self._suppress_paste_key = False
+                self._matcher = HotkeyMatcher()
+                _LOGGER.exception("输入控制失败，共享已暂停")
+                for action in self._routing.return_local():
+                    try:
+                        await self._execute_actions((action,))
+                    except Exception:
+                        _LOGGER.exception("输入恢复失败")
+                self._error_handler(f"输入控制失败，共享已暂停：{exc}")
 
     async def _handle_event(self, event: InputEvent) -> None:
         if isinstance(event, KeyEvent):
@@ -281,7 +304,13 @@ class ControllerRuntime:
                         InputMessage(
                             session.session_id,
                             self._next_sequence(),
-                            encode_input_event(action.event),
+                            encode_input_event(
+                                _target_event(
+                                    action.event,
+                                    self._local_platform,
+                                    str(getattr(session.peer, "platform", "win32")),
+                                )
+                            ),
                         )
                     )
             elif isinstance(action, ReleaseTarget):
@@ -311,10 +340,7 @@ class ControllerRuntime:
                 self._motion_diagnostic_remaining = 0
 
     async def _flush_remote_motion(self, *, force: bool) -> None:
-        if (
-            self._routing.active_device_id not in self._sessions
-            or self._remote_pointer is None
-        ):
+        if self._routing.active_device_id not in self._sessions or self._remote_pointer is None:
             self._motion.clear()
             return
         loop = asyncio.get_running_loop()
@@ -354,11 +380,7 @@ class ControllerRuntime:
     def _log_motion_sample(self, phase: str, point: Point) -> None:
         anchor = self._remote_anchor
         loop = self._loop
-        if (
-            anchor is None
-            or loop is None
-            or self._motion_diagnostic_remaining <= 0
-        ):
+        if anchor is None or loop is None or self._motion_diagnostic_remaining <= 0:
             return
         self._motion_diagnostic_remaining -= 1
         loop.call_soon_threadsafe(
@@ -377,10 +399,7 @@ def _is_post_warp_motion(position: Point, anchor: Point) -> bool:
     """Reject old edge samples while accepting the first real post-warp motion."""
     x_limit = max(64, abs(anchor.x) * 3 // 4)
     y_limit = max(64, abs(anchor.y) * 3 // 4)
-    return (
-        abs(position.x - anchor.x) <= x_limit
-        and abs(position.y - anchor.y) <= y_limit
-    )
+    return abs(position.x - anchor.x) <= x_limit and abs(position.y - anchor.y) <= y_limit
 
 
 def encode_input_event(event: InputEvent) -> dict[str, JsonValue]:
@@ -411,6 +430,23 @@ def encode_input_event(event: InputEvent) -> dict[str, JsonValue]:
             "horizontal": event.horizontal,
         }
     raise TypeError(f"不支持的输入事件：{type(event).__name__}")
+
+
+def _target_event(event: InputEvent, source: str, target: str) -> InputEvent:
+    """Swap primary shortcut modifiers only when crossing OS conventions."""
+    if not isinstance(event, KeyEvent) or source == target:
+        return event
+    if event.virtual_key in (0x11, 0xA2, 0xA3):
+        right = event.is_extended or event.virtual_key == 0xA3
+        return replace(
+            event,
+            scan_code=92 if right else 91,
+            virtual_key=0x5C if right else 0x5B,
+            is_extended=True,
+        )
+    if event.virtual_key in (0x5B, 0x5C):
+        return replace(event, scan_code=29, virtual_key=0x11, is_extended=event.virtual_key == 0x5C)
+    return event
 
 
 def decode_input_event(payload: dict[str, JsonValue]) -> InputEvent:

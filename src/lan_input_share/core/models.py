@@ -46,12 +46,15 @@ class DeviceInfo:
     role: DeviceRole
     screen: ScreenInfo
     addresses: tuple[str, ...] = ()
+    platform: str = "win32"
 
     def __post_init__(self) -> None:
         if not self.device_id.strip():
             raise ValueError("设备 ID 不能为空")
         if not self.name.strip():
             raise ValueError("设备名称不能为空")
+        if self.platform not in {"win32", "darwin"}:
+            raise ValueError("设备平台必须为 win32 或 darwin")
 
 
 @dataclass(frozen=True, slots=True)

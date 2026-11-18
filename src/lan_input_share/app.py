@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import ctypes
 import faulthandler
+import hashlib
+import importlib
 import inspect
 import json
 import socket
@@ -13,7 +14,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 from dataclasses import asdict, replace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from lan_input_share import __version__
 from lan_input_share.config.models import AppConfig, ConfigError
@@ -22,13 +23,16 @@ from lan_input_share.config.store import ConfigStore
 from lan_input_share.core.models import ScreenPosition
 from lan_input_share.logging_setup import configure_logging
 from lan_input_share.network.adapters import classify_adapter, list_adapters
+from lan_input_share.platform_support import permission_status
 from lan_input_share.runtime.service import NetworkRoleService, OverwritePromptRequest
 from lan_input_share.security.pairing import PairingRequest
 from lan_input_share.transfer.preflight import PasteDecision
 from lan_input_share.transfer.status import FileTransferStatus
 from lan_input_share.ui.close_behavior import CloseChoice, ClosePreference
 
-_ERROR_ALREADY_EXISTS = 183
+if TYPE_CHECKING:
+    from PySide6.QtCore import QLockFile
+
 _WINDOW_TITLE = "局域网键鼠共享"
 
 
@@ -101,22 +105,41 @@ class SingleInstanceGuard:
         window_activator: Callable[[str], None] | None = None,
     ) -> None:
         self._name = name
-        self._handle: int | None = None
+        self._lock: QLockFile | None = None
+        self._locked = False
         self._window_activator = window_activator
 
     def acquire(self) -> bool:
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateMutexW.argtypes = [ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p]
-        kernel32.CreateMutexW.restype = ctypes.c_void_p
-        handle = kernel32.CreateMutexW(None, False, self._name)
-        if not handle:
-            raise ctypes.WinError(ctypes.get_last_error())
-        self._handle = int(handle)
-        return ctypes.get_last_error() != _ERROR_ALREADY_EXISTS
+        from PySide6.QtCore import QLockFile
+
+        if self._locked:
+            return True
+        if self._lock is None:
+            root = AppPaths.from_environment().root
+            root.mkdir(parents=True, exist_ok=True)
+            name = hashlib.sha256(self._name.encode("utf-8")).hexdigest()[:16]
+            self._lock = QLockFile(str(root / f"instance-{name}.lock"))
+            self._lock.setStaleLockTime(0)
+        self._locked = self._lock.tryLock(0)
+        if not self._locked and self._lock.error() != QLockFile.LockError.LockFailedError:
+            raise RuntimeError(f"无法创建程序实例锁：{self._lock.error()}")
+        return self._locked
 
     def focus_existing(self) -> None:
         if self._window_activator is not None:
             self._window_activator(_WINDOW_TITLE)
+            return
+        if sys.platform == "darwin":
+            if self._lock is not None:
+                pid, _hostname, _appname = self._lock.getLockInfo()
+                if pid > 0:
+                    AppKit = importlib.import_module("AppKit")
+
+                    existing = AppKit.NSRunningApplication.runningApplicationWithProcessIdentifier_(
+                        pid
+                    )
+                    if existing is not None:
+                        existing.activateWithOptions_(AppKit.NSApplicationActivateIgnoringOtherApps)
             return
         try:
             import win32con  # type: ignore[import-untyped]
@@ -132,9 +155,9 @@ class SingleInstanceGuard:
         win32gui.EnumWindows(visit, None)
 
     def release(self) -> None:
-        if self._handle is not None:
-            ctypes.windll.kernel32.CloseHandle(self._handle)
-            self._handle = None
+        if self._lock is not None and self._locked:
+            self._lock.unlock()
+        self._locked = False
 
 
 class _NoopSafety:
@@ -165,12 +188,8 @@ class _ConfiguredRuntime:
             raise TimeoutError("启动后台运行时超时")
         self._service: NetworkRoleService | None = None
         self._pairing_callback: Callable[[PairingRequest], Future[bool]] | None = None
-        self._slot_status_callback: (
-            Callable[[ScreenPosition, str, str], None] | None
-        ) = None
-        self._transfer_status_callback: (
-            Callable[[FileTransferStatus], None] | None
-        ) = None
+        self._slot_status_callback: Callable[[ScreenPosition, str, str], None] | None = None
+        self._transfer_status_callback: Callable[[FileTransferStatus], None] | None = None
         self._overwrite_callback: (
             Callable[[OverwritePromptRequest], Future[PasteDecision]] | None
         ) = None
@@ -178,9 +197,7 @@ class _ConfiguredRuntime:
     def set_status_callback(self, callback: Callable[[str], None]) -> None:
         self._status = callback
 
-    def set_pairing_callback(
-        self, callback: Callable[[PairingRequest], Future[bool]]
-    ) -> None:
+    def set_pairing_callback(self, callback: Callable[[PairingRequest], Future[bool]]) -> None:
         self._pairing_callback = callback
 
     def set_slot_status_callback(
@@ -188,9 +205,7 @@ class _ConfiguredRuntime:
     ) -> None:
         self._slot_status_callback = callback
 
-    def set_transfer_status_callback(
-        self, callback: Callable[[FileTransferStatus], None]
-    ) -> None:
+    def set_transfer_status_callback(self, callback: Callable[[FileTransferStatus], None]) -> None:
         self._transfer_status_callback = callback
 
     def set_overwrite_callback(
@@ -229,9 +244,7 @@ class _ConfiguredRuntime:
             config = self._store.load()
         except ConfigError:
             return
-        self._store.save(
-            replace(config, close_preference=ClosePreference(choice))
-        )
+        self._store.save(replace(config, close_preference=ClosePreference(choice)))
 
     def shutdown(self) -> None:
         future = asyncio.run_coroutine_threadsafe(self._stop_service(), self._loop)
@@ -284,17 +297,13 @@ class _ConfiguredRuntime:
             return False
         return await asyncio.wrap_future(callback(request))
 
-    async def _decide_overwrite(
-        self, request: OverwritePromptRequest
-    ) -> PasteDecision:
+    async def _decide_overwrite(self, request: OverwritePromptRequest) -> PasteDecision:
         callback = self._overwrite_callback
         if callback is None:
             return PasteDecision.CANCEL
         return await asyncio.wrap_future(callback(request))
 
-    def _slot_status(
-        self, position: ScreenPosition, device_name: str, status: str
-    ) -> None:
+    def _slot_status(self, position: ScreenPosition, device_name: str, status: str) -> None:
         callback = self._slot_status_callback
         if callback is not None:
             callback(position, device_name, status)
@@ -318,11 +327,17 @@ class _ConfiguredRuntime:
 def diagnose() -> dict[str, object]:
     paths = AppPaths.from_environment()
     adapters = list_adapters()
+    try:
+        permissions: dict[str, object] = dict(permission_status())
+    except (ImportError, RuntimeError) as exc:
+        permissions = {"error": str(exc)}
     return {
         "ok": True,
         "mode": "read_only",
         "version": __version__,
         "python": sys.version.split()[0],
+        "platform": sys.platform,
+        "permissions": permissions,
         "hostname": socket.gethostname(),
         "paths": {
             "root": str(paths.root),
@@ -382,9 +397,7 @@ def _run_gui(*, minimized: bool) -> int:
         return 0
     paths = AppPaths.from_environment()
     paths.log_dir.mkdir(parents=True, exist_ok=True)
-    native_crash_log = (paths.log_dir / "native-crash.log").open(
-        "a", encoding="utf-8", buffering=1
-    )
+    native_crash_log = (paths.log_dir / "native-crash.log").open("a", encoding="utf-8", buffering=1)
     native_crash_log.write("\n=== LanInputShare process started ===\n")
     faulthandler.enable(file=native_crash_log, all_threads=True)
     configure_logging(paths.log_dir)

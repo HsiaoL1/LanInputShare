@@ -317,6 +317,26 @@ def test_version_mismatch_has_distinct_displayable_close_reason() -> None:
 
 
 @pytest.mark.asyncio
+async def test_handshake_exchanges_mac_platform_without_changing_protocol():
+    left, right = transport_pair()
+    mac = ControlSession(
+        left,
+        DeviceInfo("mac", "Mac", DeviceRole.CONTROLLER, ScreenInfo(1512, 982), platform="darwin"),
+        allow,
+    )
+    windows = ControlSession(right, device("win", DeviceRole.CLIENT), allow)
+    try:
+        await asyncio.gather(mac.start(), windows.start())
+        await asyncio.gather(next_event(mac), next_event(windows))
+        assert windows.peer is not None and windows.peer.platform == "darwin"
+        assert mac.peer is not None and mac.peer.platform == "win32"
+    finally:
+        await asyncio.gather(
+            mac.close(CloseReason.LOCAL_REQUEST), windows.close(CloseReason.LOCAL_REQUEST)
+        )
+
+
+@pytest.mark.asyncio
 async def test_version_one_peer_is_rejected_by_version_two_session() -> None:
     local, remote = transport_pair()
     session = ControlSession(
@@ -395,11 +415,8 @@ async def test_certificate_sessions_prove_private_key_possession(tmp_path) -> No
         device("desk", DeviceRole.CONTROLLER),
         allow,
         local_certificate_der=controller_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == client_identity.certificate_der,
-        certificate_approver=lambda peer, cert: approved.append(
-            (peer.device_id, cert)
-        ),
+        certificate_authenticator=lambda _peer, cert: cert == client_identity.certificate_der,
+        certificate_approver=lambda peer, cert: approved.append((peer.device_id, cert)),
         challenge_signer=controller_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -409,8 +426,7 @@ async def test_certificate_sessions_prove_private_key_possession(tmp_path) -> No
         device("laptop", DeviceRole.CLIENT),
         allow,
         local_certificate_der=client_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == controller_identity.certificate_der,
+        certificate_authenticator=lambda _peer, cert: cert == controller_identity.certificate_der,
         challenge_signer=client_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -441,11 +457,8 @@ async def test_copied_certificate_without_private_key_is_rejected(tmp_path) -> N
         device("desk", DeviceRole.CONTROLLER),
         allow,
         local_certificate_der=controller_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == expected_client.certificate_der,
-        certificate_approver=lambda peer, cert: approved.append(
-            (peer.device_id, cert)
-        ),
+        certificate_authenticator=lambda _peer, cert: cert == expected_client.certificate_der,
+        certificate_approver=lambda peer, cert: approved.append((peer.device_id, cert)),
         challenge_signer=controller_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -455,8 +468,7 @@ async def test_copied_certificate_without_private_key_is_rejected(tmp_path) -> N
         device("laptop", DeviceRole.CLIENT),
         allow,
         local_certificate_der=expected_client.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == controller_identity.certificate_der,
+        certificate_authenticator=lambda _peer, cert: cert == controller_identity.certificate_der,
         challenge_signer=attacker.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -464,9 +476,7 @@ async def test_copied_certificate_without_private_key_is_rejected(tmp_path) -> N
 
     await asyncio.gather(controller.start(), spoofed_client.start())
 
-    assert await next_event(controller) == Disconnected(
-        CloseReason.AUTHENTICATION_FAILED
-    )
+    assert await next_event(controller) == Disconnected(CloseReason.AUTHENTICATION_FAILED)
     assert controller.state is SessionState.CLOSED
     assert spoofed_client.state is not SessionState.ACTIVE
     assert approved == []
@@ -487,8 +497,7 @@ async def test_relayed_private_key_proof_from_different_tls_channel_is_rejected(
         device("desk", DeviceRole.CONTROLLER),
         allow,
         local_certificate_der=controller_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == client_identity.certificate_der,
+        certificate_authenticator=lambda _peer, cert: cert == client_identity.certificate_der,
         challenge_signer=controller_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -498,8 +507,7 @@ async def test_relayed_private_key_proof_from_different_tls_channel_is_rejected(
         device("laptop", DeviceRole.CLIENT),
         allow,
         local_certificate_der=client_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == controller_identity.certificate_der,
+        certificate_authenticator=lambda _peer, cert: cert == controller_identity.certificate_der,
         challenge_signer=client_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -528,8 +536,7 @@ async def test_auth_response_and_first_application_frame_can_share_one_read(
         device("desk", DeviceRole.CONTROLLER),
         allow,
         local_certificate_der=local_identity.certificate_der,
-        certificate_authenticator=lambda _peer, cert: cert
-        == remote_identity.certificate_der,
+        certificate_authenticator=lambda _peer, cert: cert == remote_identity.certificate_der,
         challenge_signer=local_identity.sign,
         heartbeat_interval=60,
         heartbeat_timeout=120,
@@ -548,9 +555,9 @@ async def test_auth_response_and_first_application_frame_can_share_one_read(
                     "role": "client",
                     "screen_width": 1920,
                     "screen_height": 1080,
-                    "certificate": base64.b64encode(
-                        remote_identity.certificate_der
-                    ).decode("ascii"),
+                    "certificate": base64.b64encode(remote_identity.certificate_der).decode(
+                        "ascii"
+                    ),
                 },
             )
         )
@@ -580,9 +587,7 @@ async def test_auth_response_and_first_application_frame_can_share_one_read(
                 {
                     "signature": base64.b64encode(
                         remote_identity.sign(
-                            authentication_proof_payload(
-                                local.channel_binding_data, challenge
-                            )
+                            authentication_proof_payload(local.channel_binding_data, challenge)
                         )
                     ).decode("ascii")
                 },

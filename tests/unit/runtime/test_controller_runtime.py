@@ -129,6 +129,28 @@ async def eventually() -> None:
 
 
 @pytest.mark.asyncio
+async def test_failed_cursor_handoff_pauses_sharing_and_restores_local_control():
+    runtime, hook, cursor, _session = make_runtime()
+
+    def fail_confine():
+        raise OSError("cursor permission changed")
+
+    cursor.confine_for_remote = fail_confine
+    await runtime.start()
+    try:
+        hook.emit(MouseMoveEvent(Point(1919, 500)))
+        await eventually()
+        assert runtime._routing.active_device_id == "desk"
+        assert not hook.remote_active
+        assert cursor.restored > 0
+        assert hook.emit(KeyEvent(30, 65, True)) is Suppression.PASS_THROUGH
+        await runtime.resume()
+        assert runtime._worker is not None and not runtime._worker.done()
+    finally:
+        await runtime.stop()
+
+
+@pytest.mark.asyncio
 async def test_remote_input_is_sent_only_to_active_authenticated_client() -> None:
     runtime, hook, _cursor, session = make_runtime()
     await runtime.start()

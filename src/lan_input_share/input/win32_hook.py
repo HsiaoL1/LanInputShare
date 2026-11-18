@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 import sys
 import threading
-from collections import deque
 from collections.abc import Callable
 from ctypes import wintypes
 
@@ -17,6 +16,7 @@ from lan_input_share.input.events import (
     Point,
     Suppression,
 )
+from lan_input_share.input.queue import HookEventQueue
 
 _WH_KEYBOARD_LL = 13
 _WH_MOUSE_LL = 14
@@ -46,7 +46,7 @@ _VK_ESCAPE = 0x1B
 _XBUTTON1 = 0x0001
 
 _LRESULT = wintypes.LPARAM
-_HOOKPROC = ctypes.WINFUNCTYPE(
+_HOOKPROC = getattr(ctypes, "WINFUNCTYPE", ctypes.CFUNCTYPE)(
     _LRESULT, ctypes.c_int, wintypes.WPARAM, wintypes.LPARAM
 )
 
@@ -71,40 +71,6 @@ class _MSLLHOOKSTRUCT(ctypes.Structure):
     ]
 
 
-class HookEventQueue:
-    """Non-blocking hook queue that drops stale moves, never discrete input."""
-
-    def __init__(self, capacity: int = 512) -> None:
-        if capacity <= 0:
-            raise ValueError("capacity 必须为正数")
-        self._capacity = capacity
-        self._items: deque[InputEvent] = deque()
-        self._lock = threading.Lock()
-
-    def put(self, event: InputEvent, *, coalesce_mouse_moves: bool = True) -> None:
-        with self._lock:
-            if isinstance(event, MouseMoveEvent) and coalesce_mouse_moves:
-                for index in range(len(self._items) - 1, -1, -1):
-                    if isinstance(self._items[index], MouseMoveEvent):
-                        self._items[index] = event
-                        return
-            if isinstance(event, MouseMoveEvent) and len(self._items) >= self._capacity:
-                return
-            self._items.append(event)
-
-    def get_nowait(self) -> InputEvent:
-        with self._lock:
-            if not self._items:
-                raise IndexError("输入队列为空")
-            return self._items.popleft()
-
-    def drain(self) -> tuple[InputEvent, ...]:
-        with self._lock:
-            result = tuple(self._items)
-            self._items.clear()
-            return result
-
-
 class Win32InputHook:
     def __init__(self, *, install_native: bool = True) -> None:
         if install_native and sys.platform != "win32":
@@ -112,8 +78,7 @@ class Win32InputHook:
         self._install_native = install_native
         self._callback: Callable[[InputEvent], Suppression] | None = None
         self._remote_active = False
-        self._control_down = False
-        self._alt_down = False
+        self._pressed_modifiers: set[tuple[int, bool]] = set()
         self._locally_pressed_keys: set[tuple[int, int, bool]] = set()
         self._locally_pressed_buttons: set[MouseButton] = set()
         self._thread: threading.Thread | None = None
@@ -158,8 +123,7 @@ class Win32InputHook:
         self._thread = None
         self._thread_id = 0
         self._callback = None
-        self._control_down = False
-        self._alt_down = False
+        self._pressed_modifiers.clear()
         self._locally_pressed_keys.clear()
         self._locally_pressed_buttons.clear()
 
@@ -176,15 +140,21 @@ class Win32InputHook:
         if isinstance(event, KeyEvent):
             key = (event.scan_code, event.virtual_key, event.is_extended)
             local_release = not event.is_down and key in self._locally_pressed_keys
-            if event.virtual_key == _VK_CONTROL:
-                self._control_down = event.is_down
-            elif event.virtual_key == _VK_MENU:
-                self._alt_down = event.is_down
+            modifier = None
+            if event.virtual_key in (_VK_CONTROL, 0xA2, 0xA3):
+                modifier = (_VK_CONTROL, event.is_extended or event.virtual_key == 0xA3)
+            elif event.virtual_key in (_VK_MENU, 0xA4, 0xA5):
+                modifier = (_VK_MENU, event.is_extended or event.virtual_key == 0xA5)
+            if modifier is not None:
+                if event.is_down:
+                    self._pressed_modifiers.add(modifier)
+                else:
+                    self._pressed_modifiers.discard(modifier)
             if (
                 event.virtual_key == _VK_ESCAPE
                 and event.is_down
-                and self._control_down
-                and self._alt_down
+                and any(key == _VK_CONTROL for key, _ in self._pressed_modifiers)
+                and any(key == _VK_MENU for key, _ in self._pressed_modifiers)
             ):
                 self._remote_active = False
                 callback = self._callback
@@ -192,9 +162,7 @@ class Win32InputHook:
                     callback(event)
                 return Suppression.PASS_THROUGH
         elif isinstance(event, MouseButtonEvent):
-            local_release = (
-                not event.is_down and event.button in self._locally_pressed_buttons
-            )
+            local_release = not event.is_down and event.button in self._locally_pressed_buttons
         callback = self._callback
         if callback is None:
             return Suppression.PASS_THROUGH
@@ -261,9 +229,7 @@ class Win32InputHook:
                 code: int, message: wintypes.WPARAM, data_pointer: wintypes.LPARAM
             ) -> int:
                 if code == _HC_ACTION:
-                    native = ctypes.cast(
-                        data_pointer, ctypes.POINTER(_KBDLLHOOKSTRUCT)
-                    ).contents
+                    native = ctypes.cast(data_pointer, ctypes.POINTER(_KBDLLHOOKSTRUCT)).contents
                     event = KeyEvent(
                         scan_code=int(native.scanCode),
                         virtual_key=int(native.vkCode),
@@ -279,9 +245,7 @@ class Win32InputHook:
                 code: int, message: wintypes.WPARAM, data_pointer: wintypes.LPARAM
             ) -> int:
                 if code == _HC_ACTION:
-                    native = ctypes.cast(
-                        data_pointer, ctypes.POINTER(_MSLLHOOKSTRUCT)
-                    ).contents
+                    native = ctypes.cast(data_pointer, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
                     event = _mouse_event(int(message), native)
                     if event is not None and self._dispatch(event) is Suppression.SUPPRESS:
                         return 1
@@ -292,12 +256,8 @@ class Win32InputHook:
             self._keyboard_proc = keyboard_callback
             self._mouse_proc = mouse_callback
             module = kernel32.GetModuleHandleW(None)
-            keyboard_hook = user32.SetWindowsHookExW(
-                _WH_KEYBOARD_LL, keyboard_callback, module, 0
-            )
-            mouse_hook = user32.SetWindowsHookExW(
-                _WH_MOUSE_LL, mouse_callback, module, 0
-            )
+            keyboard_hook = user32.SetWindowsHookExW(_WH_KEYBOARD_LL, keyboard_callback, module, 0)
+            mouse_hook = user32.SetWindowsHookExW(_WH_MOUSE_LL, mouse_callback, module, 0)
             if not keyboard_hook or not mouse_hook:
                 raise ctypes.WinError(ctypes.get_last_error())
             self._ready.set()

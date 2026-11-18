@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import ctypes
 import logging
 import shutil
 import ssl
+import sys
 import time
 import uuid
 import zlib
@@ -25,7 +25,6 @@ from lan_input_share.clipboard.models import (
 )
 from lan_input_share.clipboard.win32_clipboard import (
     ClipboardBusyError,
-    Win32ClipboardWatcher,
 )
 from lan_input_share.config.models import AppConfig, PeerTarget
 from lan_input_share.config.paths import AppPaths
@@ -37,9 +36,6 @@ from lan_input_share.core.models import (
     ScreenPosition,
 )
 from lan_input_share.input.events import KeyEvent
-from lan_input_share.input.win32_cursor import Win32CursorController
-from lan_input_share.input.win32_hook import Win32InputHook
-from lan_input_share.input.win32_injector import Win32InputInjector
 from lan_input_share.logging_setup import sanitize_transfer_error
 from lan_input_share.network.adapters import choose_adapters, list_adapters
 from lan_input_share.network.backoff import ExponentialBackoff
@@ -53,6 +49,16 @@ from lan_input_share.network.session import (
     CloseReason,
     ControlSession,
     SessionState,
+)
+from lan_input_share.platform_support import (
+    ClipboardWatcher,
+    create_clipboard,
+    create_cursor,
+    create_destination_resolver,
+    create_injector,
+    create_input_hook,
+    ensure_permissions,
+    primary_screen,
 )
 from lan_input_share.protocol.messages import (
     ClipboardMessage,
@@ -97,7 +103,6 @@ from lan_input_share.transfer.staging import StagingArea, TransferWorkspace
 from lan_input_share.transfer.status import FileTransferStatus, TransferState
 from lan_input_share.transfer.windows_destination import (
     DestinationKind,
-    ExplorerDestinationResolver,
     ResolvedDestination,
 )
 from lan_input_share.transfer.wire import manifest_from_payload, manifest_to_payload
@@ -242,9 +247,7 @@ class _ControlMessageWriter:
             len(data) / self._bytes_per_second - send_elapsed,
             0.0,
         )
-        reserve_delay = send_elapsed * (
-            (1.0 - self._utilization) / self._utilization
-        )
+        reserve_delay = send_elapsed * ((1.0 - self._utilization) / self._utilization)
         delay = max(rate_delay, reserve_delay)
         if delay > 0:
             await self._sleeper(delay)
@@ -302,16 +305,14 @@ class NetworkRoleService:
         self._config = config
         self._paths = paths
         self._status = status or (lambda _message: None)
-        self._slot_status = slot_status or (
-            lambda _position, _device_name, _status: None
-        )
+        self._slot_status = slot_status or (lambda _position, _device_name, _status: None)
         self._pairing_decider = pairing_decider or _reject_pairing
         self._pairing_timeout = pairing_timeout
         self._transfer_status = transfer_status or (lambda _status: None)
         self._transfer_progress_delay = transfer_progress_delay
         self._transfer_progress_interval = transfer_progress_interval
         self._overwrite_decider = overwrite_decider or _cancel_overwrite
-        self._destination_resolver = destination_resolver or ExplorerDestinationResolver()
+        self._destination_resolver = destination_resolver or create_destination_resolver()
         self._overwrite_timeout = overwrite_timeout
         self._preflight = PastePreflightService()
         self._identity: DeviceIdentity | None = None
@@ -325,7 +326,7 @@ class NetworkRoleService:
         self._tasks: list[asyncio.Task[None]] = []
         self._stop = asyncio.Event()
         self._loop: asyncio.AbstractEventLoop | None = None
-        self._clipboard: Win32ClipboardWatcher | None = None
+        self._clipboard: ClipboardWatcher | None = None
         self._clipboard_coordinator: ClipboardCoordinator | None = None
         self._clipboard_generation = uuid.uuid4().hex
         self._clipboard_sequence = 0
@@ -338,9 +339,7 @@ class NetworkRoleService:
         self._paste_operations: dict[str, _PasteOperation] = {}
         self._paste_tasks: dict[str, asyncio.Task[None]] = {}
         self._paste_probe_tasks: dict[str, asyncio.Task[None]] = {}
-        self._paste_decision_waiters: dict[
-            str, asyncio.Future[PasteDecisionResult]
-        ] = {}
+        self._paste_decision_waiters: dict[str, asyncio.Future[PasteDecisionResult]] = {}
         self._target_preflights: dict[str, _TargetPreflight] = {}
         self._target_paste_transfer_id: str | None = None
         self._resolved_destinations: dict[str, ResolvedDestination] = {}
@@ -360,23 +359,23 @@ class NetworkRoleService:
         self._referenced_transfer_id: str | None = None
 
     async def start(self) -> None:
+        ensure_permissions(self._config.role)
         self._stop.clear()
         self._loop = asyncio.get_running_loop()
-        self._identity = DeviceIdentity.load_or_create(
-            self._paths, self._config.device_name
-        )
+        self._identity = DeviceIdentity.load_or_create(self._paths, self._config.device_name)
         self._pairing = PairingCoordinator(self._identity, self._trust_store)
         self._local_device = DeviceInfo(
             self._identity.device_id,
             self._config.device_name,
             self._config.role,
             _primary_screen(),
+            platform=sys.platform,
         )
         self._clipboard_coordinator = ClipboardCoordinator(
             self._identity.device_id,
             forward_remote=self._config.role is DeviceRole.CONTROLLER,
         )
-        self._clipboard = Win32ClipboardWatcher()
+        self._clipboard = create_clipboard()
         self._clipboard.start(self._clipboard_changed_from_windows)
         self._paths.staging_dir.mkdir(parents=True, exist_ok=True)
         try:
@@ -530,15 +529,11 @@ class NetworkRoleService:
         bound = await self._listener.start(endpoint, self._accept_controller_session)
         self._status(f"客户端监听 {bound.host}:{bound.port}")
 
-    async def _start_controller_connections(
-        self, targets: tuple[PeerTarget, ...]
-    ) -> None:
+    async def _start_controller_connections(self, targets: tuple[PeerTarget, ...]) -> None:
         await self._rebuild_controller_runtime()
         for target in targets:
             self._safe_slot_status(target.position, "", "connecting")
-            self._tasks.append(
-                asyncio.create_task(self._supervise_controller_connection(target))
-            )
+            self._tasks.append(asyncio.create_task(self._supervise_controller_connection(target)))
 
     async def _supervise_controller_connection(self, target: PeerTarget) -> None:
         while not self._stop.is_set():
@@ -577,15 +572,15 @@ class NetworkRoleService:
             if session.peer is not None:
                 devices[session.peer.device_id] = session.peer
                 positions[target.position] = session.peer.device_id
-        routing = RoutingController(
-            self._local_device.device_id, devices, CrossLayout(positions)
-        )
+        routing = RoutingController(self._local_device.device_id, devices, CrossLayout(positions))
         runtime = ControllerRuntime(
             routing,
-            Win32InputHook(),
-            Win32CursorController(),
+            create_input_hook(),
+            create_cursor(),
             message_handler=self._controller_message,
             paste_handler=self._intercept_file_paste,
+            local_platform=sys.platform,
+            error_handler=self._status,
         )
         for _target, session in sessions:
             runtime.attach_session(session)
@@ -613,9 +608,7 @@ class NetworkRoleService:
                 attached = True
                 await self._rebuild_controller_runtime()
                 assert session.peer is not None
-                self._safe_slot_status(
-                    target.position, session.peer.name, "connected"
-                )
+                self._safe_slot_status(target.position, session.peer.name, "connected")
                 self._safe_status(f"已连接客户端 {target.host}:{target.port}")
                 backoff.reset()
                 await session.wait_closed()
@@ -640,8 +633,7 @@ class NetworkRoleService:
             except Exception as exc:
                 self._safe_slot_status(target.position, "", "unreachable")
                 self._safe_status(
-                    f"连接客户端 {target.host} 运行错误："
-                    f"{sanitize_transfer_error(str(exc))}"
+                    f"连接客户端 {target.host} 运行错误：{sanitize_transfer_error(str(exc))}"
                 )
             finally:
                 if attached:
@@ -652,17 +644,13 @@ class NetworkRoleService:
                                 session.peer.device_id, "设备连接已断开"
                             )
                         except Exception as exc:
-                            self._safe_status(
-                                "断线清理失败："
-                                f"{sanitize_transfer_error(str(exc))}"
-                            )
+                            self._safe_status(f"断线清理失败：{sanitize_transfer_error(str(exc))}")
                     if not self._stop.is_set():
                         try:
                             await self._rebuild_controller_runtime()
                         except Exception as exc:
                             self._safe_status(
-                                "输入运行器重建失败："
-                                f"{sanitize_transfer_error(str(exc))}"
+                                f"输入运行器重建失败：{sanitize_transfer_error(str(exc))}"
                             )
             if not self._stop.is_set():
                 self._safe_slot_status(target.position, "", "retrying")
@@ -674,9 +662,7 @@ class NetworkRoleService:
         except Exception:
             _LOGGER.exception("status callback failed")
 
-    def _safe_slot_status(
-        self, position: ScreenPosition, device_name: str, status: str
-    ) -> None:
+    def _safe_slot_status(self, position: ScreenPosition, device_name: str, status: str) -> None:
         try:
             self._slot_status(position, device_name, status)
         except Exception:
@@ -684,10 +670,15 @@ class NetworkRoleService:
 
     async def _accept_controller_session(self, session: ControlSession) -> None:
         previous = self._client_session
-        if previous is not None and previous.state not in (
-            SessionState.CLOSING,
-            SessionState.CLOSED,
-        ) and not self._is_same_controller_reconnect(previous, session.peer):
+        if (
+            previous is not None
+            and previous.state
+            not in (
+                SessionState.CLOSING,
+                SessionState.CLOSED,
+            )
+            and not self._is_same_controller_reconnect(previous, session.peer)
+        ):
             await session.close(CloseReason.ROLE_CONFLICT)
             return
         if previous is not None:
@@ -698,20 +689,16 @@ class NetworkRoleService:
                 try:
                     await previous.close(CloseReason.LOCAL_REQUEST)
                 except Exception as exc:
-                    self._status(
-                        f"旧连接关闭失败：{sanitize_transfer_error(str(exc))}"
-                    )
+                    self._status(f"旧连接关闭失败：{sanitize_transfer_error(str(exc))}")
             if stale_runtime is not None:
                 try:
                     await stale_runtime.stop()
                 except Exception as exc:
-                    self._status(
-                        f"旧连接清理失败：{sanitize_transfer_error(str(exc))}"
-                    )
+                    self._status(f"旧连接清理失败：{sanitize_transfer_error(str(exc))}")
         self._client_session = session
         runtime = ClientRuntime(
             session,
-            Win32InputInjector(),
+            create_injector(),
             message_handler=self._client_message,
         )
         self._client_runtime = runtime
@@ -730,9 +717,7 @@ class NetworkRoleService:
         cleanup_errors: list[Exception] = []
         if session.peer is not None:
             try:
-                await self._cancel_pastes_for_device(
-                    session.peer.device_id, "主控连接已断开"
-                )
+                await self._cancel_pastes_for_device(session.peer.device_id, "主控连接已断开")
             except Exception as exc:
                 cleanup_errors.append(exc)
         try:
@@ -745,9 +730,7 @@ class NetworkRoleService:
             except Exception as exc:
                 cleanup_errors.append(exc)
         for cleanup_error in cleanup_errors:
-            self._status(
-                f"断线清理失败：{sanitize_transfer_error(str(cleanup_error))}"
-            )
+            self._status(f"断线清理失败：{sanitize_transfer_error(str(cleanup_error))}")
         self._status("主控已断开")
 
     def _allow_inbound_controller(self, peer: DeviceInfo) -> bool | CloseReason:
@@ -764,18 +747,14 @@ class NetworkRoleService:
         return CloseReason.ROLE_CONFLICT
 
     @staticmethod
-    def _is_same_controller_reconnect(
-        existing: ControlSession, peer: DeviceInfo | None
-    ) -> bool:
+    def _is_same_controller_reconnect(existing: ControlSession, peer: DeviceInfo | None) -> bool:
         return (
             peer is not None
             and existing.peer is not None
             and existing.peer.device_id == peer.device_id
         )
 
-    def _verify_inbound_controller(
-        self, peer: DeviceInfo, certificate_der: bytes
-    ) -> bool:
+    def _verify_inbound_controller(self, peer: DeviceInfo, certificate_der: bytes) -> bool:
         known = next(
             (
                 item
@@ -788,9 +767,7 @@ class NetworkRoleService:
             return self._trust_store.verify(peer.device_id, certificate_der)
         return self._trust_store.find_by_certificate(certificate_der) is None
 
-    async def _approve_inbound_controller(
-        self, peer: DeviceInfo, certificate_der: bytes
-    ) -> None:
+    async def _approve_inbound_controller(self, peer: DeviceInfo, certificate_der: bytes) -> None:
         if self._trust_store.verify(peer.device_id, certificate_der):
             return
         assert self._pairing is not None
@@ -807,18 +784,12 @@ class NetworkRoleService:
         endpoint_key = f"{target.host}:{target.port}"
 
         def authenticate(peer: DeviceInfo) -> bool:
-            return (
-                peer.role is DeviceRole.CLIENT
-                and (
-                    target.expected_device_id is None
-                    or target.expected_device_id == peer.device_id
-                )
+            return peer.role is DeviceRole.CLIENT and (
+                target.expected_device_id is None or target.expected_device_id == peer.device_id
             )
 
         def verify(peer: DeviceInfo, certificate_der: bytes) -> bool:
-            if self._trust_store.verify_endpoint(
-                endpoint_key, peer.device_id, certificate_der
-            ):
+            if self._trust_store.verify_endpoint(endpoint_key, peer.device_id, certificate_der):
                 return True
             endpoint_known = self._trust_store.endpoint_binding(endpoint_key)
             if endpoint_known is not None:
@@ -831,14 +802,10 @@ class NetworkRoleService:
                 ),
                 None,
             )
-            return existing is None or self._trust_store.verify(
-                peer.device_id, certificate_der
-            )
+            return existing is None or self._trust_store.verify(peer.device_id, certificate_der)
 
         def approve(peer: DeviceInfo, certificate_der: bytes) -> None:
-            self._trust_store.approve_endpoint(
-                endpoint_key, peer.device_id, certificate_der
-            )
+            self._trust_store.approve_endpoint(endpoint_key, peer.device_id, certificate_der)
 
         return SessionCallbacks(authenticate, verify, approve)
 
@@ -900,9 +867,7 @@ class NetworkRoleService:
                 text,
                 generation=self._clipboard_generation,
             )
-        loop.call_soon_threadsafe(
-            lambda: asyncio.create_task(self._handle_local_clipboard(item))
-        )
+        loop.call_soon_threadsafe(lambda: asyncio.create_task(self._handle_local_clipboard(item)))
 
     async def _handle_local_clipboard(self, item: ClipboardItem) -> None:
         coordinator = self._clipboard_coordinator
@@ -960,9 +925,7 @@ class NetworkRoleService:
         self._completed_file_targets.clear()
         await self._receive_clipboard_message(controller_id, message)
 
-    async def _receive_clipboard_message(
-        self, sender_id: str, message: ClipboardMessage
-    ) -> None:
+    async def _receive_clipboard_message(self, sender_id: str, message: ClipboardMessage) -> None:
         if message.payload.get("kind") == ClipboardKind.IMAGE.value:
             state = _image_receive_state(sender_id, message)
             if state is None:
@@ -989,9 +952,7 @@ class NetworkRoleService:
                     and action.item.kind is ClipboardKind.TEXT
                     and isinstance(action.item.payload, str)
                 ):
-                    self._clipboard.write_unicode_text(
-                        action.item.payload, action.item.marker
-                    )
+                    self._clipboard.write_unicode_text(action.item.payload, action.item.marker)
                 elif (
                     self._clipboard is not None
                     and action.item.kind is ClipboardKind.IMAGE
@@ -1014,9 +975,8 @@ class NetworkRoleService:
             and session.peer is not None
             and session.peer.device_id != action.exclude_origin_id
         )
-        if (
-            action.item.kind is ClipboardKind.IMAGE
-            and isinstance(action.item.payload, ClipboardImage)
+        if action.item.kind is ClipboardKind.IMAGE and isinstance(
+            action.item.payload, ClipboardImage
         ):
             if len(action.item.payload.data) > _MAX_CLIPBOARD_IMAGE_BYTES:
                 self._status("截图过大，未同步到其他设备")
@@ -1130,9 +1090,7 @@ class NetworkRoleService:
         for session in self._file_sessions(exclude_device_id):
             await self._send_file_message(session, FileOfferMessage, payload)
 
-    async def _receive_file_offer(
-        self, sender_id: str, message: FileOfferMessage
-    ) -> None:
+    async def _receive_file_offer(self, sender_id: str, message: FileOfferMessage) -> None:
         source_id = message.payload.get("source_id")
         raw_manifest = message.payload.get("manifest")
         if not isinstance(source_id, str):
@@ -1174,9 +1132,7 @@ class NetworkRoleService:
     async def _request_file_paste(self, offer: _FileOffer, target_id: str) -> None:
         assert self._identity is not None
         transfer_id = offer.manifest.transfer_id
-        operation = _PasteOperation(
-            transfer_id, offer.source_id, target_id, offer.manifest
-        )
+        operation = _PasteOperation(transfer_id, offer.source_id, target_id, offer.manifest)
         self._paste_operations[transfer_id] = operation
         self._file_requests[transfer_id] = (offer.source_id, target_id)
         try:
@@ -1202,13 +1158,9 @@ class NetworkRoleService:
                     ).to_payload(),
                 )
                 try:
-                    decision = await asyncio.wait_for(
-                        waiter, timeout=self._overwrite_timeout
-                    )
+                    decision = await asyncio.wait_for(waiter, timeout=self._overwrite_timeout)
                 except TimeoutError:
-                    decision = PasteDecisionResult(
-                        transfer_id, PasteDecision.CANCEL, (), False
-                    )
+                    decision = PasteDecisionResult(transfer_id, PasteDecision.CANCEL, (), False)
                 finally:
                     self._paste_decision_waiters.pop(transfer_id, None)
             await self._apply_paste_decision(operation, decision)
@@ -1221,9 +1173,7 @@ class NetworkRoleService:
             self._status(f"文件传输无法开始：{category}")
             await self._broadcast_file_abort(transfer_id, category)
 
-    async def _prepare_target_preflight(
-        self, probe: PasteProbe
-    ) -> PasteDecisionResult:
+    async def _prepare_target_preflight(self, probe: PasteProbe) -> PasteDecisionResult:
         transfer_id = probe.transfer_id
         busy = self._target_paste_transfer_id
         if busy is not None and busy != transfer_id:
@@ -1233,13 +1183,9 @@ class NetworkRoleService:
             destination = await self._destination_resolver.resolve_foreground()
         except Exception:
             self._release_target_preflight(transfer_id)
-            return PasteDecisionResult(
-                transfer_id, PasteDecision.CANCEL, (), False
-            )
+            return PasteDecisionResult(transfer_id, PasteDecision.CANCEL, (), False)
         if destination.kind is DestinationKind.COMPATIBILITY:
-            decision = PasteDecisionResult(
-                transfer_id, PasteDecision.OVERWRITE, (), True
-            )
+            decision = PasteDecisionResult(transfer_id, PasteDecision.OVERWRITE, (), True)
             self._target_preflights[transfer_id] = _TargetPreflight(
                 probe.source_id,
                 probe.target_id,
@@ -1253,19 +1199,14 @@ class NetworkRoleService:
             result = self._preflight.scan(destination.path, probe.manifest)
         except (OSError, RuntimeError, ValueError):
             self._release_target_preflight(transfer_id)
-            return PasteDecisionResult(
-                transfer_id, PasteDecision.CANCEL, (), False
-            )
+            return PasteDecisionResult(transfer_id, PasteDecision.CANCEL, (), False)
         if result.conflict_count == 0:
             choice = PasteDecision.OVERWRITE
         else:
             request = OverwritePromptRequest(
                 transfer_id,
                 result.conflict_count,
-                tuple(
-                    conflict.relative_path.as_posix()
-                    for conflict in result.conflict_preview
-                ),
+                tuple(conflict.relative_path.as_posix() for conflict in result.conflict_preview),
             )
             try:
                 choice = await asyncio.wait_for(
@@ -1305,24 +1246,16 @@ class NetworkRoleService:
         decision = await self._prepare_target_preflight(probe)
         session = self._client_session
         if session is not None:
-            await self._send_file_message(
-                session, FilePasteDecisionMessage, decision.to_payload()
-            )
+            await self._send_file_message(session, FilePasteDecisionMessage, decision.to_payload())
 
-    def _spawn_file_paste_probe(
-        self, sender_id: str, message: FilePasteProbeMessage
-    ) -> None:
+    def _spawn_file_paste_probe(self, sender_id: str, message: FilePasteProbeMessage) -> None:
         transfer_id = message.payload.get("transfer_id")
         if not isinstance(transfer_id, str) or transfer_id in self._paste_probe_tasks:
             return
-        task = asyncio.create_task(
-            self._run_file_paste_probe(sender_id, message, transfer_id)
-        )
+        task = asyncio.create_task(self._run_file_paste_probe(sender_id, message, transfer_id))
         self._paste_probe_tasks[transfer_id] = task
         task.add_done_callback(
-            lambda completed: self._discard_paste_probe_task(
-                transfer_id, completed
-            )
+            lambda completed: self._discard_paste_probe_task(transfer_id, completed)
         )
 
     async def _run_file_paste_probe(
@@ -1338,13 +1271,9 @@ class NetworkRoleService:
             raise
         except (ConnectionError, OSError, RuntimeError, ValueError) as exc:
             self._release_target_preflight(transfer_id)
-            self._status(
-                f"文件传输无法开始：{sanitize_transfer_error(str(exc))}"
-            )
+            self._status(f"文件传输无法开始：{sanitize_transfer_error(str(exc))}")
 
-    def _discard_paste_probe_task(
-        self, transfer_id: str, completed: asyncio.Task[None]
-    ) -> None:
+    def _discard_paste_probe_task(self, transfer_id: str, completed: asyncio.Task[None]) -> None:
         if self._paste_probe_tasks.get(transfer_id) is completed:
             self._paste_probe_tasks.pop(transfer_id, None)
 
@@ -1365,12 +1294,7 @@ class NetworkRoleService:
             return
         operation = self._paste_operations.get(decision.transfer_id)
         waiter = self._paste_decision_waiters.get(decision.transfer_id)
-        if (
-            operation is None
-            or waiter is None
-            or sender_id != operation.target_id
-            or waiter.done()
-        ):
+        if operation is None or waiter is None or sender_id != operation.target_id or waiter.done():
             return
         waiter.set_result(decision)
 
@@ -1381,20 +1305,14 @@ class NetworkRoleService:
             raise ValueError("粘贴决定与传输 ID 不一致")
         if decision.decision is PasteDecision.CANCEL:
             self._terminate_paste(operation.transfer_id)
-            await self._broadcast_file_abort(
-                operation.transfer_id, "文件粘贴已取消"
-            )
+            await self._broadcast_file_abort(operation.transfer_id, "文件粘贴已取消")
             return
         operation.transition(_PastePhase.APPROVED)
         filtered = filter_manifest(operation.manifest, decision.skipped_paths)
         if not filtered.entries:
-            self._completed_file_targets.add(
-                (operation.transfer_id, operation.target_id)
-            )
+            self._completed_file_targets.add((operation.transfer_id, operation.target_id))
             self._terminate_paste(operation.transfer_id)
-            await self._broadcast_file_abort(
-                operation.transfer_id, "没有需要传输的文件"
-            )
+            await self._broadcast_file_abort(operation.transfer_id, "没有需要传输的文件")
             return
         payload: dict[str, JsonValue] = {
             "action": "start",
@@ -1411,22 +1329,16 @@ class NetworkRoleService:
             original = self._local_file_manifests.get(operation.transfer_id)
             if original is None:
                 raise RuntimeError("源文件清单已失效")
-            local_source_manifest = filter_manifest(
-                original, decision.skipped_paths
-            )
+            local_source_manifest = filter_manifest(original, decision.skipped_paths)
             if local_source_manifest.entries != filtered.entries:
                 raise RuntimeError("过滤后的文件清单不一致")
         if operation.target_id == self._identity.device_id:
-            await self._start_file_receiver(
-                filtered, operation.source_id, operation.target_id
-            )
+            await self._start_file_receiver(filtered, operation.source_id, operation.target_id)
         else:
             target_session = self._session_for_device(operation.target_id)
             if target_session is None:
                 raise ConnectionError("目标设备未连接")
-            await self._send_file_message(
-                target_session, FileRequestMessage, payload
-            )
+            await self._send_file_message(target_session, FileRequestMessage, payload)
         if operation.source_id == self._identity.device_id:
             assert local_source_manifest is not None
             await self._start_file_sender(
@@ -1438,9 +1350,7 @@ class NetworkRoleService:
             source_session = self._session_for_device(operation.source_id)
             if source_session is None:
                 raise ConnectionError("源设备未连接")
-            await self._send_file_message(
-                source_session, FileRequestMessage, payload
-            )
+            await self._send_file_message(source_session, FileRequestMessage, payload)
         operation.transition(_PastePhase.TRANSFERRING)
 
     def _release_target_preflight(self, transfer_id: str) -> None:
@@ -1459,9 +1369,7 @@ class NetworkRoleService:
         self._file_requests.pop(transfer_id, None)
         self._release_target_preflight(transfer_id)
 
-    async def _receive_file_request(
-        self, sender_id: str, message: FileRequestMessage
-    ) -> None:
+    async def _receive_file_request(self, sender_id: str, message: FileRequestMessage) -> None:
         action = message.payload.get("action")
         transfer_id = message.payload.get("transfer_id")
         source_id = message.payload.get("source_id")
@@ -1493,9 +1401,7 @@ class NetworkRoleService:
             or not isinstance(compatibility, bool)
         ):
             return
-        skipped_paths = tuple(
-            PurePosixPath(path) for path in cast(list[str], raw_skipped)
-        )
+        skipped_paths = tuple(PurePosixPath(path) for path in cast(list[str], raw_skipped))
         try:
             if self._identity.device_id == target_id:
                 target_preflight = self._target_preflights.get(transfer_id)
@@ -1506,17 +1412,11 @@ class NetworkRoleService:
                     or target_preflight.result.compatibility != compatibility
                     or target_preflight.result.skipped_paths != skipped_paths
                 ):
-                    await self._broadcast_file_abort(
-                        transfer_id, "目标预检状态已失效"
-                    )
+                    await self._broadcast_file_abort(transfer_id, "目标预检状态已失效")
                     return
-                expected_manifest = filter_manifest(
-                    target_preflight.manifest, skipped_paths
-                )
+                expected_manifest = filter_manifest(target_preflight.manifest, skipped_paths)
                 if expected_manifest.entries != manifest.entries:
-                    await self._broadcast_file_abort(
-                        transfer_id, "目标预检清单与启动清单不一致"
-                    )
+                    await self._broadcast_file_abort(transfer_id, "目标预检清单与启动清单不一致")
                     return
                 await self._start_file_receiver(manifest, source_id, target_id)
             if self._identity.device_id == source_id:
@@ -1547,21 +1447,16 @@ class NetworkRoleService:
             )
             self._file_senders[transfer_id] = sender
             writer = _ControlMessageWriter(
-                lambda data: self._emit_file_data(
-                    transfer_id, source_id, target_id, data
-                ),
+                lambda data: self._emit_file_data(transfer_id, source_id, target_id, data),
                 bytes_per_second=(
                     None
-                    if self._identity is not None
-                    and target_id == self._identity.device_id
+                    if self._identity is not None and target_id == self._identity.device_id
                     else _FILE_RATE_LIMIT_BYTES_PER_SECOND
                 ),
             )
             result = await sender.send(manifest, writer)
             if not result.success:
-                await self._broadcast_file_abort(
-                    transfer_id, result.error or "文件发送失败"
-                )
+                await self._broadcast_file_abort(transfer_id, result.error or "文件发送失败")
 
         task = asyncio.create_task(run())
         self._file_send_tasks[transfer_id] = task
@@ -1589,10 +1484,8 @@ class NetworkRoleService:
             assert target_preflight is not None
             destination = target_preflight.destination.path
             assert destination is not None
-            direct_workspace = (
-                DestinationTransferWorkspace.reserve(
-                    destination, manifest, target_preflight.result
-                )
+            direct_workspace = DestinationTransferWorkspace.reserve(
+                destination, manifest, target_preflight.result
             )
             workspace: TransferWorkspace | DestinationWorkspace = direct_workspace
             self._destination_workspaces[transfer_id] = direct_workspace
@@ -1621,21 +1514,15 @@ class NetworkRoleService:
                 transfer_id,
                 success=result.success,
                 bytes_transferred=result.bytes_transferred,
-                error=sanitize_transfer_error(result.error)
-                if not result.success
-                else None,
+                error=sanitize_transfer_error(result.error) if not result.success else None,
             )
             if not result.success:
-                await self._broadcast_file_abort(
-                    transfer_id, result.error or "文件接收失败"
-                )
+                await self._broadcast_file_abort(transfer_id, result.error or "文件接收失败")
                 return
             try:
                 if direct:
                     self._completed_file_targets.add((transfer_id, target_id))
-                    await self._notify_file_complete(
-                        transfer_id, source_id, target_id
-                    )
+                    await self._notify_file_complete(transfer_id, source_id, target_id)
                     self._status(f"文件传输完成：{result.files_completed} 个文件")
                     return
                 if self._clipboard is None:
@@ -1791,9 +1678,7 @@ class NetworkRoleService:
             },
         )
 
-    async def _receive_file_data(
-        self, sender_id: str, message: FileDataMessage
-    ) -> None:
+    async def _receive_file_data(self, sender_id: str, message: FileDataMessage) -> None:
         if message.payload.get("channel") == "clipboard_image":
             await self._receive_clipboard_image_data(sender_id, message)
             return
@@ -1802,8 +1687,7 @@ class NetworkRoleService:
         target_id = message.payload.get("target_id")
         encoded = message.payload.get("data")
         if not all(
-            isinstance(value, str)
-            for value in (transfer_id, source_id, target_id, encoded)
+            isinstance(value, str) for value in (transfer_id, source_id, target_id, encoded)
         ):
             return
         assert isinstance(transfer_id, str)
@@ -1812,9 +1696,9 @@ class NetworkRoleService:
         assert isinstance(encoded, str)
         if self._config.role is DeviceRole.CONTROLLER and sender_id != source_id:
             return
-        if (
-            self._config.role is DeviceRole.CONTROLLER
-            and self._file_requests.get(transfer_id) != (source_id, target_id)
+        if self._config.role is DeviceRole.CONTROLLER and self._file_requests.get(transfer_id) != (
+            source_id,
+            target_id,
         ):
             return
         try:
@@ -1833,9 +1717,7 @@ class NetworkRoleService:
             if session is not None:
                 await self._send_file_message(session, FileDataMessage, message.payload)
 
-    async def _receive_clipboard_image_data(
-        self, sender_id: str, message: FileDataMessage
-    ) -> None:
+    async def _receive_clipboard_image_data(self, sender_id: str, message: FileDataMessage) -> None:
         transfer_id = message.payload.get("transfer_id")
         offset = message.payload.get("offset")
         final = message.payload.get("final")
@@ -1897,9 +1779,7 @@ class NetworkRoleService:
         for session in self._file_sessions():
             await self._send_file_message(session, FileAbortMessage, payload)
 
-    async def _receive_file_abort(
-        self, _sender_id: str, message: FileAbortMessage
-    ) -> None:
+    async def _receive_file_abort(self, _sender_id: str, message: FileAbortMessage) -> None:
         transfer_id = message.payload.get("transfer_id")
         reason = message.payload.get("reason")
         if not isinstance(transfer_id, str) or not isinstance(reason, str):
@@ -1928,13 +1808,9 @@ class NetworkRoleService:
                 "reason": reason,
             }
             for session in self._file_sessions(exclude_device_id=_sender_id):
-                await self._send_file_message(
-                    session, FileAbortMessage, safe_payload
-                )
+                await self._send_file_message(session, FileAbortMessage, safe_payload)
 
-    async def _notify_file_complete(
-        self, transfer_id: str, source_id: str, target_id: str
-    ) -> None:
+    async def _notify_file_complete(self, transfer_id: str, source_id: str, target_id: str) -> None:
         self._terminate_paste(transfer_id)
         if self._config.role is DeviceRole.CLIENT and self._client_session is not None:
             await self._send_file_message(
@@ -1949,15 +1825,22 @@ class NetworkRoleService:
             )
 
     def _replay_paste(self) -> None:
-        injector = Win32InputInjector()
-        injector.inject(KeyEvent(29, 0x11, True))
-        injector.inject(KeyEvent(47, 0x56, True))
-        injector.inject(KeyEvent(47, 0x56, False))
-        injector.inject(KeyEvent(29, 0x11, False))
+        injector = create_injector()
+        modifier = (
+            KeyEvent(91, 0x5B, True, True) if sys.platform == "darwin" else KeyEvent(29, 0x11, True)
+        )
+        try:
+            injector.inject(modifier)
+            injector.inject(KeyEvent(47, 0x56, True))
+        finally:
+            try:
+                injector.inject(KeyEvent(47, 0x56, False))
+            finally:
+                injector.inject(
+                    KeyEvent(modifier.scan_code, modifier.virtual_key, False, modifier.is_extended)
+                )
 
-    def _file_sessions(
-        self, exclude_device_id: str | None = None
-    ) -> tuple[ControlSession, ...]:
+    def _file_sessions(self, exclude_device_id: str | None = None) -> tuple[ControlSession, ...]:
         sessions = (
             tuple(self._controller_sessions.values())
             if self._config.role is DeviceRole.CONTROLLER
@@ -1983,9 +1866,7 @@ class NetworkRoleService:
         message_class: type[WireMessage],
         payload: dict[str, JsonValue],
     ) -> None:
-        await session.send(
-            message_class(session.session_id, self._wire_sequence, payload)
-        )
+        await session.send(message_class(session.session_id, self._wire_sequence, payload))
         self._wire_sequence += 1
 
 
@@ -1998,8 +1879,7 @@ async def _cancel_overwrite(_request: OverwritePromptRequest) -> PasteDecision:
 
 
 def _primary_screen() -> ScreenInfo:
-    user32 = ctypes.windll.user32
-    return ScreenInfo(int(user32.GetSystemMetrics(0)), int(user32.GetSystemMetrics(1)))
+    return primary_screen()
 
 
 def _selected_bind_ip(config: AppConfig) -> str | None:
@@ -2030,9 +1910,7 @@ def _item_from_marker(marker: str, text: str) -> ClipboardItem | None:
     return item if item.digest == digest else None
 
 
-def _image_item_from_marker(
-    marker: str, image: ClipboardImage
-) -> ClipboardItem | None:
+def _image_item_from_marker(marker: str, image: ClipboardImage) -> ClipboardItem | None:
     parts = marker.split(":")
     if len(parts) == 3:
         origin_id, raw_sequence, digest = parts
@@ -2053,9 +1931,7 @@ def _image_item_from_marker(
     return item if item.digest == digest else None
 
 
-def _image_receive_state(
-    sender_id: str, message: ClipboardMessage
-) -> _ImageReceiveState | None:
+def _image_receive_state(sender_id: str, message: ClipboardMessage) -> _ImageReceiveState | None:
     payload = message.payload
     metadata = payload.get("payload")
     origin_id = payload.get("origin_id")
