@@ -14,7 +14,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Protocol, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from lan_input_share.clipboard.coordinator import ClipboardCoordinator
 from lan_input_share.clipboard.models import (
@@ -36,10 +36,6 @@ from lan_input_share.core.models import (
     ScreenInfo,
     ScreenPosition,
 )
-<<<<<<< HEAD
-from lan_input_share.input.events import KeyEvent
-=======
-from lan_input_share.elevated.client import HelperInputBridge
 from lan_input_share.elevated.models import (
     HELPER_PROTOCOL_VERSION,
     ApprovedClient,
@@ -51,10 +47,6 @@ from lan_input_share.input.routed_injector import (
     RoutedInputInjector,
     StaticHelperInput,
 )
-from lan_input_share.input.win32_cursor import Win32CursorController
-from lan_input_share.input.win32_hook import Win32InputHook
-from lan_input_share.input.win32_injector import Win32InputInjector
->>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
 from lan_input_share.logging_setup import sanitize_transfer_error
 from lan_input_share.network.adapters import list_adapters, selected_ipv4
 from lan_input_share.network.backoff import ExponentialBackoff
@@ -93,7 +85,7 @@ from lan_input_share.protocol.messages import (
 )
 from lan_input_share.routing.controller import RoutingController
 from lan_input_share.routing.layout import CrossLayout
-from lan_input_share.runtime.client import ClientRuntime
+from lan_input_share.runtime.client import ClientRuntime, InputInjector
 from lan_input_share.runtime.controller import ControllerRuntime
 from lan_input_share.security.identity import DeviceIdentity, PeerHello
 from lan_input_share.security.pairing import (
@@ -126,11 +118,15 @@ from lan_input_share.transfer.windows_destination import (
     ResolvedDestination,
 )
 from lan_input_share.transfer.wire import manifest_from_payload, manifest_to_payload
-from lan_input_share.windows.input_helper_install import (
-    INPUT_HELPER_EXE_NAME,
-    InputHelperManager,
-)
-from lan_input_share.windows.process_identity import inspect_process_identity
+
+if TYPE_CHECKING or sys.platform == "win32":
+    from lan_input_share.elevated.client import HelperInputBridge
+    from lan_input_share.input.win32_injector import Win32InputInjector
+    from lan_input_share.windows.input_helper_install import (
+        INPUT_HELPER_EXE_NAME,
+        InputHelperManager,
+    )
+    from lan_input_share.windows.process_identity import inspect_process_identity
 
 _LOGGER = logging.getLogger("lan_input_share.runtime")
 
@@ -367,7 +363,7 @@ class NetworkRoleService:
         self._client_runtime: ClientRuntime | None = None
         self._client_session: ControlSession | None = None
         self._helper_input: ManagedHelperInput | None = None
-        self._client_injector: RoutedInputInjector | None = None
+        self._client_injector: InputInjector | None = None
         self._latest_helper_status: HelperStatus | None = None
         self._last_sent_capability: str | None = None
         self._controller_sessions: dict[PeerTarget, ControlSession] = {}
@@ -411,15 +407,11 @@ class NetworkRoleService:
         ensure_permissions(self._config.role)
         self._stop.clear()
         self._loop = asyncio.get_running_loop()
-<<<<<<< HEAD
-        self._identity = DeviceIdentity.load_or_create(self._paths, self._config.device_name)
-=======
         if self._config.role is DeviceRole.CLIENT:
             self._ensure_client_input()
         self._identity = DeviceIdentity.load_or_create(
             self._paths, self._config.device_name
         )
->>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
         self._pairing = PairingCoordinator(self._identity, self._trust_store)
         self._local_device = DeviceInfo(
             self._identity.device_id,
@@ -502,7 +494,7 @@ class NetworkRoleService:
         if self._helper_input is not None:
             self._helper_input.stop()
             self._helper_input = None
-            self._client_injector = None
+        self._client_injector = None
         sessions = [*self._controller_sessions.values()]
         if self._client_session is not None:
             sessions.append(self._client_session)
@@ -761,11 +753,7 @@ class NetworkRoleService:
         assert self._client_injector is not None
         runtime = ClientRuntime(
             session,
-<<<<<<< HEAD
-            create_injector(),
-=======
             self._client_injector,
->>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
             message_handler=self._client_message,
         )
         self._client_runtime = runtime
@@ -778,7 +766,10 @@ class NetworkRoleService:
         self._tasks.append(asyncio.create_task(self._watch_client_session(session)))
 
     def _ensure_client_input(self) -> None:
-        if self._helper_input is not None:
+        if self._client_injector is not None:
+            return
+        if sys.platform == "darwin":
+            self._client_injector = create_injector()
             return
         helper = self._helper_factory()
         routed = RoutedInputInjector(

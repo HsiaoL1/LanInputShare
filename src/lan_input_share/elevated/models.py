@@ -7,6 +7,10 @@ from pathlib import Path
 HELPER_PROTOCOL_VERSION = 1
 
 
+class HelperUnavailableError(RuntimeError):
+    pass
+
+
 class HelperState(StrEnum):
     NOT_INSTALLED = "not_installed"
     RUNNING = "running"
@@ -68,4 +72,5 @@ __all__ = [
     "ClientIdentity",
     "HelperState",
     "HelperStatus",
+    "HelperUnavailableError",
 ]

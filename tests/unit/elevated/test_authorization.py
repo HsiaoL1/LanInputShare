@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 import pytest
@@ -76,6 +77,7 @@ def test_authorize_client_rejects_protocol_version_mismatch() -> None:
     assert decision.reason is AuthorizationReason.VERSION_MISMATCH
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows path normalization")
 def test_authorize_client_compares_windows_path_case_insensitively() -> None:
     decision = authorize_client(
         approved(),

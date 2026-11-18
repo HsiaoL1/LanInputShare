@@ -8,7 +8,12 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Protocol, cast
 
-from lan_input_share.elevated.models import ApprovedClient, HelperState, HelperStatus
+from lan_input_share.elevated.models import (
+    ApprovedClient,
+    HelperState,
+    HelperStatus,
+    HelperUnavailableError,
+)
 from lan_input_share.elevated.pipe_transport import (
     NamedPipeClient,
     pipe_name_for,
@@ -26,10 +31,6 @@ from lan_input_share.elevated.protocol import (
 )
 from lan_input_share.input.events import InputEvent, MouseMoveEvent
 from lan_input_share.windows.process_identity import inspect_process_identity
-
-
-class HelperUnavailableError(RuntimeError):
-    pass
 
 
 class HelperQueueFull(HelperUnavailableError):

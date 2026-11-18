@@ -14,7 +14,7 @@ task_python="${PYTHON:-python3.13}"
 .venv/bin/python -m pytest -q
 .venv/bin/python -m ruff check src tests
 .venv/bin/python -m mypy --follow-imports=silent \
-    --exclude '(^|/)(win32_[^/]+\.py|windows/|windows_destination\.py)' src
+    --exclude '(^|/)(win32_[^/]+\.py|windows/|windows_destination\.py|pipe_transport\.py)' src
 .venv/bin/python -m PyInstaller --noconfirm --clean packaging/macos.spec
 dist/LanInputShare.app/Contents/MacOS/LanInputShare --gui-smoke-test
 dist/LanInputShare.app/Contents/MacOS/LanInputShare --diagnose

@@ -5,8 +5,7 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Protocol
 
-from lan_input_share.elevated.client import HelperUnavailableError
-from lan_input_share.elevated.models import HelperState, HelperStatus
+from lan_input_share.elevated.models import HelperState, HelperStatus, HelperUnavailableError
 from lan_input_share.input.events import InputEvent
 from lan_input_share.input.key_state import PressedInputState
 

@@ -1,8 +1,8 @@
-# Mac 与 Windows 互通
+# Mac 与 Mac、Windows 互通
 
-0.2.0 加入 macOS 原生适配，支持 Mac/Windows 任一方向作为主控。共享键盘、鼠标、文字、截图以及文件/文件夹复制粘贴。每台电脑使用一个显示器；程序不传输屏幕视频。
+macOS 原生适配支持 Mac 与 Mac 连接，也支持 Mac/Windows 任一方向作为主控。共享键盘、鼠标、文字、截图以及文件/文件夹复制粘贴。每台电脑使用一个显示器；程序不传输屏幕视频。
 
-macOS 代码在 Windows 环境完成逻辑测试，真实 Mac 输入、权限和双机测试尚未验收。请先完成本文末尾的验收清单。
+macOS 代码已在 Mac 上完成自动测试和本机打包烟测；真实双机输入和权限尚未验收。
 
 ## 在 Mac 上运行
 
@@ -30,7 +30,7 @@ python -m lan_input_share
 
 两端使用同一版本；先启动客户端，设置设备名、客户端角色、实际 Wi-Fi/以太网网卡，然后“保存并启动”。在主控选择主控角色、摆放本机和客户端位置、填写客户端局域网 IPv4 和端口 `24870`。连接后到客户端核对设备名、证书指纹并确认配对。两端防火墙允许专用局域网连接，VPN/TUN 的局域网地址走物理网卡。
 
-将鼠标移出相邻屏幕边缘即可控制另一台电脑。Windows 主控的 `Ctrl+C/V` 在 Mac 目标上转换成 `Command+C/V`；Mac 主控的 `Command+C/V` 在 Windows 上转换成 `Ctrl+C/V`。跨平台时 Control 和 Command/Windows 修饰键互换，其余按键按位置映射，字符、输入法及键盘布局由目标系统决定。
+将鼠标移出相邻屏幕边缘即可控制另一台电脑。Mac 到 Mac 时 Command、Control 和 Option 保持原样。Windows 主控的 `Ctrl+C/V` 在 Mac 目标上转换成 `Command+C/V`；Mac 主控的 `Command+C/V` 在 Windows 上转换成 `Ctrl+C/V`。跨平台时 Control 和 Command/Windows 修饰键互换，其余按键按位置映射，字符、输入法及键盘布局由目标系统决定。
 
 Mac 主控操作远端时，本机光标会停驻在屏幕中央并保持可见，以兼容应用在托盘和后台运行；返回本机后恢复位置。Mac 没有对应键位的 Windows 按键（如 Print Screen、菜单键）会被忽略，连接保持正常。
 
@@ -54,4 +54,4 @@ bash scripts/build-macos.sh
 
 普通测试：`python -m pytest -q`。原生 Mac 集成测试使用 `LAN_INPUT_SHARE_RUN_MACOS_INTEGRATION=1 python -m pytest -q -m macos_integration` 显式启用，它们会暂时读写剪贴板或测试输入，先保存正在编辑的内容。
 
-真实设备检查见 [Mac/Windows 双机验收清单](acceptance/macos-windows-checklist.md)。Secure Input（例如密码输入）、登录界面、锁屏、Windows UAC 安全桌面以及多显示器布局不在当前范围内。
+真实设备检查见 [Mac/Mac 双机验收清单](acceptance/macos-macos-checklist.md)和 [Mac/Windows 双机验收清单](acceptance/macos-windows-checklist.md)。Secure Input（例如密码输入）、登录界面、锁屏、Windows UAC 安全桌面以及多显示器布局不在当前范围内。

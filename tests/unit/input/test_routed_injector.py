@@ -4,8 +4,7 @@ from collections.abc import Callable
 
 import pytest
 
-from lan_input_share.elevated.client import HelperUnavailableError
-from lan_input_share.elevated.models import HelperState, HelperStatus
+from lan_input_share.elevated.models import HelperState, HelperStatus, HelperUnavailableError
 from lan_input_share.input.events import KeyEvent
 from lan_input_share.input.routed_injector import RoutedInputInjector
 

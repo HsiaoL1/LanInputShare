@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from lan_input_share.core.models import DeviceInfo, DeviceRole, ScreenInfo
 from lan_input_share.input.events import (
     KeyEvent,
     MouseButton,
@@ -19,10 +20,16 @@ from lan_input_share.input.events import (
     Point,
     Suppression,
 )
-from lan_input_share.network.session import CloseReason, MessageReceived, SessionEvent
+from lan_input_share.network.session import CloseReason, MessageReceived, SessionEvent, SessionState
 from lan_input_share.protocol.messages import InputMessage
+from lan_input_share.routing.controller import RoutingController
+from lan_input_share.routing.layout import LinearLayout
 from lan_input_share.runtime.client import ClientRuntime
-from lan_input_share.runtime.controller import encode_input_event
+from lan_input_share.runtime.controller import (
+    ControllerRuntime,
+    decode_input_event,
+    encode_input_event,
+)
 
 
 class FakeQuartz:
@@ -541,6 +548,61 @@ def test_injection_applies_modifier_flags_to_keys_and_releases_both_sides(
     assert quartz.posted[0]["type"] == 12
     assert quartz.posted[3]["type"] == 10
     assert all(event["fields"][42] != 0 for event in quartz.posted)
+
+
+@pytest.mark.asyncio
+async def test_mac_to_mac_input_keeps_command_and_mouse_events(
+    native: tuple[FakeQuartz, FakeCoreFoundation],
+) -> None:
+    quartz, _ = native
+    mac_hook = importlib.import_module("lan_input_share.input.macos_hook").MacOSInputHook()
+    mac_cursor = importlib.import_module(
+        "lan_input_share.input.macos_cursor"
+    ).MacOSCursorController()
+    mac_injector = importlib.import_module(
+        "lan_input_share.input.macos_injector"
+    ).MacOSInputInjector()
+    local = DeviceInfo(
+        "local", "Mac 1", DeviceRole.CONTROLLER, ScreenInfo(1440, 900), platform="darwin"
+    )
+    peer = DeviceInfo("peer", "Mac 2", DeviceRole.CLIENT, ScreenInfo(1440, 900), platform="darwin")
+    routing = RoutingController(
+        "local", {"local": local, "peer": peer}, LinearLayout(("local", "peer"))
+    )
+
+    class Session:
+        session_id = "mac-session"
+        state = SessionState.ACTIVE
+
+        def __init__(self) -> None:
+            self.peer = peer
+            self.sent: list[InputMessage] = []
+
+        async def send(self, message: InputMessage) -> None:
+            self.sent.append(message)
+
+    session = Session()
+    runtime = ControllerRuntime(routing, mac_hook, mac_cursor, local_platform="darwin")
+    runtime.attach_session(session)
+    routing.activate("peer")
+    native_events = (
+        (quartz.kCGEventFlagsChanged, {"fields": {9: 55}, "flags": 0x100008}),
+        (quartz.kCGEventKeyDown, {"fields": {9: 8}}),
+        (quartz.kCGEventMouseMoved, {"position": Point(300, 250)}),
+        (quartz.kCGEventLeftMouseDown, {}),
+        (quartz.kCGEventScrollWheel, {"fields": {11: 1}}),
+    )
+    for kind, event in native_events:
+        for translated in mac_hook._translate(kind, event):
+            await runtime._execute_actions(routing.handle_input(translated))
+    for message in session.sent:
+        mac_injector.inject(decode_input_event(message.payload))
+
+    assert [event["keycode"] for event in quartz.posted[:2]] == [55, 8]
+    assert quartz.posted[1]["flags"] & quartz.kCGEventFlagMaskCommand
+    assert quartz.posted[2]["position"] == Point(300, 250)
+    assert quartz.posted[3]["type"] == quartz.kCGEventLeftMouseDown
+    assert quartz.posted[4]["axes"] == (1, 0)
 
 
 def test_injected_marker_prevents_hook_feedback(

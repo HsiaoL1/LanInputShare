@@ -116,7 +116,7 @@ class MainWindow(QMainWindow):
             "Windows UAC 安全桌面仍需在客户端本机确认。"
         )
         self.helper_explanation_label.setWordWrap(True)
-        helper_buttons = QWidget()
+        helper_buttons = QWidget(self.client_settings_box)
         helper_buttons_layout = QHBoxLayout(helper_buttons)
         helper_buttons_layout.setContentsMargins(0, 0, 0, 0)
         self.helper_enable_button = QPushButton("启用增强控制")
@@ -125,9 +125,12 @@ class MainWindow(QMainWindow):
         helper_buttons_layout.addWidget(self.helper_enable_button)
         helper_buttons_layout.addWidget(self.helper_repair_button)
         helper_buttons_layout.addWidget(self.helper_remove_button)
-        client_layout.addRow("增强控制", self.helper_status_label)
-        client_layout.addRow("", self.helper_explanation_label)
-        client_layout.addRow("", helper_buttons)
+        if sys.platform == "win32":
+            client_layout.addRow("增强控制", self.helper_status_label)
+            client_layout.addRow("", self.helper_explanation_label)
+            client_layout.addRow("", helper_buttons)
+        else:
+            helper_buttons.hide()
         layout.addWidget(self.client_settings_box)
 
         self.status_label = QLabel(view_model.connection_status_text)

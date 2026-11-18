@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import sys
+
 import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGroupBox, QMessageBox, QPushButton
@@ -119,6 +121,7 @@ def test_controller_shows_cross_editor_and_client_hides_position_fields(qtbot) -
     assert window.findChild(CrossLayoutEditor, "crossLayoutEditor") is not None
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows input helper controls")
 def test_client_helper_row_explains_uac_and_secure_desktop(qtbot) -> None:  # type: ignore[no-untyped-def]
     runtime = FakeRuntime()
     view_model = AppViewModel(runtime)
@@ -142,6 +145,19 @@ def test_client_helper_row_explains_uac_and_secure_desktop(qtbot) -> None:  # ty
 
     window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CONTROLLER))
     assert not window.client_settings_box.isVisible()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS interface")
+def test_mac_client_hides_windows_input_helper_controls(qtbot) -> None:  # type: ignore[no-untyped-def]
+    window = MainWindow(AppViewModel(FakeRuntime()))
+    qtbot.addWidget(window)
+    window.show()
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CLIENT))
+
+    assert window.client_settings_box.isVisible()
+    assert not window.helper_status_label.isVisible()
+    assert not window.helper_explanation_label.isVisible()
+    assert not window.helper_enable_button.isVisible()
 
 
 def test_client_panel_shows_the_selected_physical_lan_ip(

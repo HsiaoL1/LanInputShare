@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from lan_input_share.config.models import AppConfig, PeerTarget
 from lan_input_share.config.paths import AppPaths
 from lan_input_share.core.models import DeviceRole, ScreenPosition
 from lan_input_share.elevated.models import ClientIdentity, HelperState, HelperStatus
+from lan_input_share.input.events import KeyEvent
 from lan_input_share.protocol.messages import InputCapabilityMessage
 from lan_input_share.runtime.service import NetworkRoleService
 
@@ -47,6 +49,39 @@ class FakeLocal:
 
 
 @pytest.mark.asyncio
+async def test_mac_client_uses_native_injector_without_windows_helper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    received: list[object] = []
+
+    class MacInjector:
+        def inject(self, event: object) -> None:
+            received.append(event)
+
+        def release_all(self, events: tuple[object, ...]) -> None:
+            received.extend(events)
+
+    def unexpected_helper() -> FakeHelper:
+        raise AssertionError("Mac client must not start a Windows helper")
+
+    monkeypatch.setattr(service_module.sys, "platform", "darwin")
+    monkeypatch.setattr(service_module, "create_injector", MacInjector)
+    service = NetworkRoleService(
+        AppConfig.default(device_name="mac-client", role=DeviceRole.CLIENT),
+        _paths(tmp_path),
+        helper_factory=unexpected_helper,
+    )
+
+    service._ensure_client_input()
+    assert service._client_injector is not None
+    service._client_injector.inject(KeyEvent(91, 0x5B, True, True))
+    assert received == [KeyEvent(91, 0x5B, True, True)]
+    assert service._helper_input is None
+    await service.stop()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows input helper")
 async def test_client_helper_lifecycle_has_no_duplicate_threads(
     tmp_path: Path,
     monkeypatch,
@@ -146,6 +181,7 @@ async def test_client_sends_input_capability_only_on_state_change(tmp_path: Path
     ]
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows input helper")
 def test_default_helper_bridge_can_observe_install_without_app_restart(
     tmp_path: Path,
     monkeypatch,

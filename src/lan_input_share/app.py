@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import ctypes
 import faulthandler
 import hashlib
 import importlib
@@ -14,12 +15,8 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 from dataclasses import asdict, replace
-<<<<<<< HEAD
-from typing import TYPE_CHECKING, Protocol
-=======
 from pathlib import Path
-from typing import Protocol
->>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
+from typing import TYPE_CHECKING, Protocol
 
 from lan_input_share import __version__
 from lan_input_share.config.models import AppConfig, ConfigError
@@ -36,15 +33,17 @@ from lan_input_share.transfer.preflight import PasteDecision
 from lan_input_share.transfer.status import FileTransferStatus
 from lan_input_share.ui.close_behavior import CloseChoice, ClosePreference
 from lan_input_share.windows.dpi import enable_per_monitor_v2
-from lan_input_share.windows.input_helper_install import (
-    INPUT_HELPER_EXE_NAME,
-    InputHelperManager,
-)
-from lan_input_share.windows.privilege import (
-    is_elevated,
-    request_helper_install,
-    request_helper_remove,
-)
+
+if TYPE_CHECKING or sys.platform == "win32":
+    from lan_input_share.windows.input_helper_install import (
+        INPUT_HELPER_EXE_NAME,
+        InputHelperManager,
+    )
+    from lan_input_share.windows.privilege import (
+        is_elevated,
+        request_helper_install,
+        request_helper_remove,
+    )
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QLockFile
@@ -204,10 +203,6 @@ class _ConfiguredRuntime:
             raise TimeoutError("启动后台运行时超时")
         self._service: NetworkRoleService | None = None
         self._pairing_callback: Callable[[PairingRequest], Future[bool]] | None = None
-<<<<<<< HEAD
-        self._slot_status_callback: Callable[[ScreenPosition, str, str], None] | None = None
-        self._transfer_status_callback: Callable[[FileTransferStatus], None] | None = None
-=======
         self._slot_status_callback: (
             Callable[[ScreenPosition, str, str], None] | None
         ) = None
@@ -215,7 +210,6 @@ class _ConfiguredRuntime:
             Callable[[FileTransferStatus], None] | None
         ) = None
         self._helper_status_callback: Callable[[HelperStatus], None] | None = None
->>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
         self._overwrite_callback: (
             Callable[[OverwritePromptRequest], Future[PasteDecision]] | None
         ) = None
@@ -271,12 +265,18 @@ class _ConfiguredRuntime:
             self._submit(self._service.cancel_transfer(transfer_id))
 
     def enable_input_helper(self) -> None:
+        if sys.platform != "win32":
+            return
         request_helper_install(str(_current_executable()))
 
     def repair_input_helper(self) -> None:
+        if sys.platform != "win32":
+            return
         request_helper_install(str(_current_executable()))
 
     def remove_input_helper(self) -> None:
+        if sys.platform != "win32":
+            return
         request_helper_remove(str(_current_executable()))
 
     def remember_close_choice(self, choice: CloseChoice | None) -> None:
@@ -433,6 +433,9 @@ def _current_executable() -> Path:
 
 
 def _run_input_helper_maintenance(arguments: argparse.Namespace) -> int:
+    if sys.platform != "win32":
+        print("高权限输入助手仅支持 Windows", file=sys.stderr)
+        return 2
     main_exe = _current_executable()
     helper_source = main_exe.with_name(INPUT_HELPER_EXE_NAME)
     manager = InputHelperManager()
@@ -473,7 +476,7 @@ def _run_input_helper_maintenance(arguments: argparse.Namespace) -> int:
 def _show_helper_maintenance_error(title: str, error: Exception) -> None:
     message = f"{title}，请返回主程序后重试。\n\n{error}"
     print(message, file=sys.stderr)
-    if getattr(sys, "frozen", False):
+    if sys.platform == "win32" and getattr(sys, "frozen", False):
         ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
 
 
