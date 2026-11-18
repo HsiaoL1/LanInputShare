@@ -20,4 +20,5 @@ dist/LanInputShare.app/Contents/MacOS/LanInputShare --gui-smoke-test
 dist/LanInputShare.app/Contents/MacOS/LanInputShare --diagnose
 ditto -c -k --sequesterRsrc --keepParent dist/LanInputShare.app dist/LanInputShare-macos.zip
 shasum -a 256 dist/LanInputShare-macos.zip > dist/LanInputShare-macos.sha256
+bash scripts/package-macos-dmg.sh
 echo "Built: $task_root/dist/LanInputShare.app"

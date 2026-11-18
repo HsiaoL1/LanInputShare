@@ -23,7 +23,7 @@ class TrayController(QObject):
         self.pause_action.setCheckable(True)
         self.return_local_action = QAction("返回主控", self.menu)
         self.settings_action = QAction("打开设置", self.menu)
-        self.diagnostics_action = QAction("导出诊断", self.menu)
+        self.diagnostics_action = QAction("导出诊断与日志", self.menu)
         self.quit_action = QAction("退出", self.menu)
         self.menu.addAction(self.pause_action)
         self.menu.addAction(self.return_local_action)

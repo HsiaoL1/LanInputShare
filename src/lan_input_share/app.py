@@ -15,6 +15,7 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 from dataclasses import asdict, replace
+from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -47,6 +48,9 @@ if TYPE_CHECKING or sys.platform == "win32":
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QLockFile
+
+    from lan_input_share.ui.main_window import MainWindow
+    from lan_input_share.ui.view_model import AppViewModel
 
 _WINDOW_TITLE = "局域网键鼠共享"
 
@@ -550,6 +554,7 @@ def _run_gui(*, minimized: bool) -> int:
         can_minimize_to_tray=tray.is_available,
         minimized_to_tray=tray.show_minimized_message,
     )
+    _bind_diagnostics_export(view_model, window, paths, store)
     overwrite_dialogs: dict[str, OverwriteDialog] = {}
 
     def show_overwrite(value: object) -> None:
@@ -582,6 +587,53 @@ def _run_gui(*, minimized: bool) -> int:
         guard.release()
         faulthandler.disable()
         native_crash_log.close()
+
+
+def _bind_diagnostics_export(
+    view_model: AppViewModel,
+    window: MainWindow,
+    paths: AppPaths,
+    store: ConfigStore,
+) -> None:
+    from PySide6.QtWidgets import QFileDialog, QMessageBox
+
+    from lan_input_share.diagnostics.report import DiagnosticReportBuilder
+
+    def export() -> None:
+        hostname = socket.gethostname().split(".")[0]
+        filename = f"LanInputShare-{hostname}-{datetime.now():%Y%m%d-%H%M%S}.zip"
+        desktop = Path.home() / "Desktop"
+        folder = desktop if desktop.is_dir() else Path.home()
+        selected, _filter = QFileDialog.getSaveFileName(
+            window, "导出诊断与日志", str(folder / filename), "ZIP 文件 (*.zip)"
+        )
+        if not selected:
+            return
+        destination = Path(selected)
+        if destination.suffix.casefold() != ".zip":
+            destination = destination.with_suffix(".zip")
+        try:
+            try:
+                config: AppConfig | dict[str, object] = store.load()
+            except ConfigError:
+                config = {}
+            logs = tuple(paths.log_dir.glob("lan-input-share.log*"))
+            crash_log = paths.log_dir / "native-crash.log"
+            if crash_log.is_file():
+                logs += (crash_log,)
+            archive = DiagnosticReportBuilder(
+                version=__version__,
+                config=config,
+                adapters=list_adapters(),
+                selected_route={"connection_status": view_model.connection_status_text},
+                log_paths=logs,
+            ).build(destination)
+        except Exception as exc:
+            QMessageBox.warning(window, "导出失败", str(exc))
+            return
+        QMessageBox.information(window, "导出完成", f"诊断与日志已保存到：\n{archive}")
+
+    view_model.diagnostics_requested.connect(export)
 
 
 async def _await_object(value: object) -> None:

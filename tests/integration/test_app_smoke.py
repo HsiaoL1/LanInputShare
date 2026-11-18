@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import threading
+import zipfile
 from pathlib import Path
 
 import pytest
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox, QPushButton
 
+import lan_input_share.app as app_module
 from lan_input_share.app import (
     ApplicationCoordinator,
     SingleInstanceGuard,
@@ -18,6 +20,9 @@ from lan_input_share.config.models import AppConfig
 from lan_input_share.config.paths import AppPaths
 from lan_input_share.config.store import ConfigStore
 from lan_input_share.core.models import DeviceRole
+from lan_input_share.ui.close_behavior import CloseChoice
+from lan_input_share.ui.main_window import MainWindow
+from lan_input_share.ui.view_model import AppViewModel
 
 
 class Resource:
@@ -101,6 +106,56 @@ def test_gui_smoke_mode_loads_qt_without_starting_the_desktop_runtime() -> None:
     application = QApplication.instance()
     assert isinstance(application, QApplication)
     assert application.windowIcon().cacheKey() == application_icon().cacheKey()
+
+
+def test_export_diagnostics_button_saves_both_application_and_crash_logs(
+    qtbot, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = AppPaths(
+        root=tmp_path,
+        config_file=tmp_path / "config.json",
+        log_dir=tmp_path / "logs",
+        identity_dir=tmp_path / "identity",
+        staging_dir=tmp_path / "staging",
+    )
+    paths.log_dir.mkdir()
+    (paths.log_dir / "lan-input-share.log").write_text("current event\n", encoding="utf-8")
+    (paths.log_dir / "lan-input-share.log.1").write_text("older event\n", encoding="utf-8")
+    (paths.log_dir / "native-crash.log").write_text("traceback\n", encoding="utf-8")
+    store = ConfigStore(paths.config_file)
+    store.save(AppConfig.default(device_name="Mac Test", role=DeviceRole.CLIENT))
+    view_model = AppViewModel(object())
+    window = MainWindow(view_model)
+    qtbot.addWidget(window)
+    destination = tmp_path / "Mac-Test.zip"
+    messages: list[str] = []
+    errors: list[str] = []
+    monkeypatch.setattr(QFileDialog, "getSaveFileName", lambda *_args: (str(destination), ""))
+    monkeypatch.setattr(
+        QMessageBox, "information", lambda _parent, _title, message: messages.append(message)
+    )
+    monkeypatch.setattr(
+        QMessageBox, "warning", lambda _parent, _title, message: errors.append(message)
+    )
+    monkeypatch.setattr(
+        "lan_input_share.ui.main_window.ask_close_choice",
+        lambda _parent: (CloseChoice.QUIT, False),
+    )
+    monkeypatch.setattr(app_module, "list_adapters", lambda: ())
+    app_module._bind_diagnostics_export(view_model, window, paths, store)
+
+    button = next(
+        button for button in window.findChildren(QPushButton) if button.text() == "导出诊断与日志"
+    )
+    button.click()
+
+    with zipfile.ZipFile(destination) as bundle:
+        assert json.loads(bundle.read("report.json"))["config"]["device_name"] == "Mac Test"
+        assert bundle.read("logs/lan-input-share.log") == b"current event\n"
+        assert bundle.read("logs/lan-input-share.log.1") == b"older event\n"
+        assert bundle.read("logs/native-crash.log") == b"traceback\n"
+    assert messages and str(destination) in messages[0]
+    assert errors == []
 
 
 def test_packaging_spec_embeds_runtime_and_executable_icon() -> None:

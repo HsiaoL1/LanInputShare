@@ -142,7 +142,7 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("保存并启动")
         self.start_button.setObjectName("startButton")
         self.start_button.setEnabled(view_model.can_start)
-        diagnostics = QPushButton("导出诊断")
+        diagnostics = QPushButton("导出诊断与日志")
         return_local = QPushButton("返回主控")
         buttons.addWidget(self.start_button)
         buttons.addWidget(return_local)

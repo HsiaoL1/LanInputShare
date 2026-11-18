@@ -25,6 +25,7 @@ _LOG_SECRET = re.compile(
     r"(?i)\b(token|password|secret|clipboard|private[_ -]?key)\s*[:=]\s*.*?"
     r"(?=\s+\w[\w -]*\s*[:=]|$)"
 )
+_LOG_FILE_NAME = re.compile(r".+\.log(?:\.[1-3])?\Z", re.IGNORECASE)
 
 
 class DiagnosticReportBuilder:
@@ -64,7 +65,11 @@ class DiagnosticReportBuilder:
             ).encode("utf-8")
         }
         for path in self._log_paths:
-            if path.suffix.casefold() != ".log" or not path.is_file():
+            if (
+                not _LOG_FILE_NAME.fullmatch(path.name)
+                or not path.is_file()
+                or path.is_symlink()
+            ):
                 continue
             text = path.read_text(encoding="utf-8", errors="replace")[-500_000:]
             files[f"logs/{path.name}"] = _redact_log(text).encode("utf-8")

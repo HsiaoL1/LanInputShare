@@ -38,6 +38,12 @@ Mac 主控的紧急返回为 **Control+Option+Esc**，设备切换为 **Control+
 
 文字和截图自动同步。在来源复制文件/文件夹后切换到目标，使用主控自身的 `Ctrl+V`（Windows）或 `Command+V`（Mac）开始传输。已解析的 Finder/资源管理器目录会在传输前检查冲突；其他应用由其原生粘贴流程接收文件。剪切按复制处理。
 
+## 安装与收集日志
+
+打开 `LanInputShare-macos.dmg`，将 `LanInputShare.app` 拖到“应用程序”，再从“应用程序”启动。首次使用按上文授予权限。当前测试包按构建机器的 CPU 架构生成；Apple Silicon 与 Intel 需要各自对应的包。本次 arm64 测试包尚未使用 Developer ID 签名和公证；若首次启动被 macOS 阻止，尝试打开应用后进入“系统设置 → 隐私与安全性”，选择“仍要打开”。仅对确认来源的测试包执行此操作。
+
+遇到问题时，在**两台 Mac 上分别**点击主窗口或托盘菜单的“导出诊断与日志”，各选一个保存位置。生成的 ZIP 包含诊断信息、运行日志及近期轮转日志、原生崩溃日志；文件名默认包含本机名称和导出时间。请把两个 ZIP 一起提供，并说明哪台是主控、操作步骤和发生时间。若程序无法打开，可手动从 `~/Library/Application Support/LanInputShare/logs` 取出日志。分享前请检查设备名、局域网 IP 等信息。
+
 ## 构建 Mac 应用
 
 必须在 Mac 上执行，不支持从 Windows 交叉生成 `.app`：
@@ -46,7 +52,7 @@ Mac 主控的紧急返回为 **Control+Option+Esc**，设备切换为 **Control+
 bash scripts/build-macos.sh
 ```
 
-生成 `dist/LanInputShare.app`、`dist/LanInputShare-macos.zip` 和 SHA-256 文件。构建前运行测试、Ruff、mypy，构建后检查 Qt 加载和只读诊断。以 Apple Silicon Python 构建 arm64 包，以 Intel Python 构建 x86_64 包。可通过 `MACOS_CODESIGN_IDENTITY` 指定本机签名身份；公开分发所需的签名与公证仍需在 Mac 上完成。复制到 `/Applications` 后再授予权限，避免移动程序后需要重新授权。
+生成 `dist/LanInputShare.app`、`dist/LanInputShare-macos.zip`、`dist/LanInputShare-macos.dmg` 及各包的 SHA-256 文件。构建前运行测试、Ruff、mypy，构建后检查 Qt 加载和只读诊断。以 Apple Silicon Python 构建 arm64 包，以 Intel Python 构建 x86_64 包。可通过 `MACOS_CODESIGN_IDENTITY` 指定本机签名身份；公开分发所需的签名与公证仍需在 Mac 上完成。复制到 `/Applications` 后再授予权限，避免移动程序后需要重新授权。
 
 配置、身份、日志和暂存文件位于 `~/Library/Application Support/LanInputShare`。诊断里 `platform` 应为 `darwin`。
 

@@ -17,7 +17,7 @@ LanInputShare 是一个面向 Windows 10/11 和 macOS 13+ 的局域网键盘、�
 - 文件传输分块、限速并保留控制消息优先级，降低大文件占满 Wi-Fi 后造成的键鼠延迟。
 - TLS 1.3 加密连接、设备身份校验和首次连接确认。
 - 记忆设备名称、角色、网卡、客户端 IP、端口与屏幕布局。
-- 支持托盘运行、暂停共享、返回主控、诊断导出和安全退出。
+- 支持托盘运行、暂停共享、返回主控、导出诊断与日志 ZIP 和安全退出。
 - Windows 客户端可一次性启用“增强控制”，日常无需管理员运行主程序即可操作普通桌面上的管理员窗口。
 
 ## 使用边界
@@ -99,6 +99,8 @@ powershell -ExecutionPolicy Bypass -File scripts\build.ps1
 运行数据位于 `%LOCALAPPDATA%\LanInputShare`：
 
 Mac 对应位置为 `~/Library/Application Support/LanInputShare`。
+
+Mac 测试包为 `dist/LanInputShare-macos.dmg`，打开后将应用拖到“应用程序”。两台 Mac 各自在主窗口或托盘选择“导出诊断与日志”，保存生成的 ZIP；文件名含本机名称和时间，便于一起提交排查。
 
 - `config.json`：界面配置；
 - `identity\`：本机身份密钥和证书，不要分享；

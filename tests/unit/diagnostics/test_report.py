@@ -40,6 +40,27 @@ def test_diagnostic_archive_contains_route_adapter_version_and_redacted_config(
     assert "private text" not in redacted_log
 
 
+def test_diagnostic_archive_includes_rotated_and_native_crash_logs(tmp_path: Path) -> None:
+    current = tmp_path / "lan-input-share.log"
+    rotated = tmp_path / "lan-input-share.log.1"
+    crash = tmp_path / "native-crash.log"
+    current.write_text("current event\n", encoding="utf-8")
+    rotated.write_text("earlier event\n", encoding="utf-8")
+    crash.write_text("traceback location\n", encoding="utf-8")
+    builder = DiagnosticReportBuilder(
+        version="test",
+        config={},
+        adapters=(),
+        selected_route={},
+        log_paths=(current, rotated, crash),
+    )
+
+    with zipfile.ZipFile(builder.build(tmp_path / "diagnostics.zip")) as bundle:
+        assert bundle.read("logs/lan-input-share.log") == b"current event\n"
+        assert bundle.read("logs/lan-input-share.log.1") == b"earlier event\n"
+        assert bundle.read("logs/native-crash.log") == b"traceback location\n"
+
+
 def test_diagnostic_archive_excludes_identity_key_clipboard_and_file_content(
     tmp_path: Path,
 ) -> None:
