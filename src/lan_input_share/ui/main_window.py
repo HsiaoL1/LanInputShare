@@ -20,11 +20,13 @@ from PySide6.QtWidgets import (
 )
 
 from lan_input_share.core.models import DeviceRole
+from lan_input_share.network.adapters import list_adapters, selected_ipv4
 from lan_input_share.ui.close_behavior import CloseChoice, ask_close_choice
 from lan_input_share.ui.cross_layout_editor import CrossLayoutEditor
 from lan_input_share.ui.resources import application_icon
 from lan_input_share.ui.view_model import (
     AppViewModel,
+    HelperStatusView,
     PairingView,
     SlotView,
 )
@@ -95,11 +97,37 @@ class MainWindow(QMainWindow):
 
         self.client_settings_box = QGroupBox("客户端监听")
         client_layout = QFormLayout(self.client_settings_box)
+        self.client_ip_label = QLabel()
+        self.client_ip_label.setObjectName("clientLanIpLabel")
+        self.client_ip_label.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse
+        )
         self.client_port_label = QLabel("24870")
         self.bound_controller_label = QLabel("已信任主控可自动连接；新主控首次连接时将在本机确认")
         self.bound_controller_label.setWordWrap(True)
+        client_layout.addRow("本机局域网 IP", self.client_ip_label)
         client_layout.addRow("监听端口", self.client_port_label)
         client_layout.addRow("连接确认", self.bound_controller_label)
+        self.helper_status_label = QLabel(view_model.helper_status.text)
+        self.helper_status_label.setObjectName("helperStatusLabel")
+        self.helper_status_label.setWordWrap(True)
+        self.helper_explanation_label = QLabel(
+            "启用增强控制时可能仅首次请求一次 UAC；"
+            "Windows UAC 安全桌面仍需在客户端本机确认。"
+        )
+        self.helper_explanation_label.setWordWrap(True)
+        helper_buttons = QWidget()
+        helper_buttons_layout = QHBoxLayout(helper_buttons)
+        helper_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        self.helper_enable_button = QPushButton("启用增强控制")
+        self.helper_repair_button = QPushButton("修复增强控制")
+        self.helper_remove_button = QPushButton("移除增强控制")
+        helper_buttons_layout.addWidget(self.helper_enable_button)
+        helper_buttons_layout.addWidget(self.helper_repair_button)
+        helper_buttons_layout.addWidget(self.helper_remove_button)
+        client_layout.addRow("增强控制", self.helper_status_label)
+        client_layout.addRow("", self.helper_explanation_label)
+        client_layout.addRow("", helper_buttons)
         layout.addWidget(self.client_settings_box)
 
         self.status_label = QLabel(view_model.connection_status_text)
@@ -135,20 +163,26 @@ class MainWindow(QMainWindow):
         self.name_edit.textChanged.connect(view_model.set_device_name)
         self.role_combo.currentIndexChanged.connect(self._role_changed)
         self.adapter_combo.currentIndexChanged.connect(self._adapter_changed)
-        self.adapter_combo.editTextChanged.connect(view_model.set_adapter)
+        self.adapter_combo.editTextChanged.connect(self._adapter_text_changed)
         self.cross_editor.layout_changed.connect(self._cross_layout_changed)
         self.cross_editor.peer_moved.connect(view_model.apply_layout_immediately)
         self.cross_editor.validation_failed.connect(
             lambda message: QMessageBox.warning(self, "屏幕排列无效", message)
         )
         self.start_button.clicked.connect(view_model.apply_settings)
+        self.helper_enable_button.clicked.connect(view_model.enable_input_helper)
+        self.helper_repair_button.clicked.connect(view_model.repair_input_helper)
+        self.helper_remove_button.clicked.connect(view_model.remove_input_helper)
         diagnostics.clicked.connect(view_model.request_diagnostics)
         return_local.clicked.connect(view_model.return_local)
         view_model.validation_changed.connect(self.start_button.setEnabled)
         view_model.connection_status_changed.connect(self.status_label.setText)
         view_model.pairing_requested.connect(self._show_pairing)
         view_model.slot_status_changed.connect(self._update_slot)
+        view_model.helper_status_changed.connect(self._update_helper_status)
+        self._update_helper_status(view_model.helper_status)
         self._update_role_panels(view_model.role)
+        self._refresh_client_ip()
 
     def restore(self) -> None:
         self.showNormal()
@@ -190,10 +224,26 @@ class MainWindow(QMainWindow):
             role = None
         self._view_model.set_role(role)
         self._update_role_panels(role)
+        self._refresh_client_ip()
 
     def _adapter_changed(self, index: int) -> None:
         value = self.adapter_combo.itemData(index)
         self._view_model.set_adapter(str(value or self.adapter_combo.currentText()))
+        self._refresh_client_ip()
+
+    def _adapter_text_changed(self, text: str) -> None:
+        index = self.adapter_combo.currentIndex()
+        if index < 0 or self.adapter_combo.itemText(index) != text:
+            self._view_model.set_adapter(text)
+        self._refresh_client_ip()
+
+    def _refresh_client_ip(self) -> None:
+        adapter_id = self._view_model.adapter_id
+        manual_id = None if adapter_id in {"", "auto"} else adapter_id
+        address = selected_ipv4(list_adapters(), manual_id)
+        self.client_ip_label.setText(
+            address or "未检测到可用的局域网 IP"
+        )
 
     def _cross_layout_changed(self) -> None:
         try:
@@ -228,5 +278,13 @@ class MainWindow(QMainWindow):
             return
         self.cross_editor.set_slot_status(value.position, value.device_name, value.status)
 
+
+    def _update_helper_status(self, value: object) -> None:
+        if not isinstance(value, HelperStatusView):
+            return
+        self.helper_status_label.setText(value.text)
+        self.helper_enable_button.setVisible(value.can_enable)
+        self.helper_repair_button.setVisible(value.can_repair)
+        self.helper_remove_button.setVisible(value.can_remove)
 
 __all__ = ["MainWindow"]

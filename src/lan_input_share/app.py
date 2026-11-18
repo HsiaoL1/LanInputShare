@@ -14,13 +14,19 @@ from collections.abc import Callable, Sequence
 from concurrent.futures import CancelledError, Future
 from contextlib import suppress
 from dataclasses import asdict, replace
+<<<<<<< HEAD
 from typing import TYPE_CHECKING, Protocol
+=======
+from pathlib import Path
+from typing import Protocol
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
 
 from lan_input_share import __version__
 from lan_input_share.config.models import AppConfig, ConfigError
 from lan_input_share.config.paths import AppPaths
 from lan_input_share.config.store import ConfigStore
 from lan_input_share.core.models import ScreenPosition
+from lan_input_share.elevated.models import HelperStatus
 from lan_input_share.logging_setup import configure_logging
 from lan_input_share.network.adapters import classify_adapter, list_adapters
 from lan_input_share.platform_support import permission_status
@@ -29,6 +35,16 @@ from lan_input_share.security.pairing import PairingRequest
 from lan_input_share.transfer.preflight import PasteDecision
 from lan_input_share.transfer.status import FileTransferStatus
 from lan_input_share.ui.close_behavior import CloseChoice, ClosePreference
+from lan_input_share.windows.dpi import enable_per_monitor_v2
+from lan_input_share.windows.input_helper_install import (
+    INPUT_HELPER_EXE_NAME,
+    InputHelperManager,
+)
+from lan_input_share.windows.privilege import (
+    is_elevated,
+    request_helper_install,
+    request_helper_remove,
+)
 
 if TYPE_CHECKING:
     from PySide6.QtCore import QLockFile
@@ -188,8 +204,18 @@ class _ConfiguredRuntime:
             raise TimeoutError("启动后台运行时超时")
         self._service: NetworkRoleService | None = None
         self._pairing_callback: Callable[[PairingRequest], Future[bool]] | None = None
+<<<<<<< HEAD
         self._slot_status_callback: Callable[[ScreenPosition, str, str], None] | None = None
         self._transfer_status_callback: Callable[[FileTransferStatus], None] | None = None
+=======
+        self._slot_status_callback: (
+            Callable[[ScreenPosition, str, str], None] | None
+        ) = None
+        self._transfer_status_callback: (
+            Callable[[FileTransferStatus], None] | None
+        ) = None
+        self._helper_status_callback: Callable[[HelperStatus], None] | None = None
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
         self._overwrite_callback: (
             Callable[[OverwritePromptRequest], Future[PasteDecision]] | None
         ) = None
@@ -207,6 +233,11 @@ class _ConfiguredRuntime:
 
     def set_transfer_status_callback(self, callback: Callable[[FileTransferStatus], None]) -> None:
         self._transfer_status_callback = callback
+
+    def set_helper_status_callback(
+        self, callback: Callable[[HelperStatus], None]
+    ) -> None:
+        self._helper_status_callback = callback
 
     def set_overwrite_callback(
         self,
@@ -238,6 +269,15 @@ class _ConfiguredRuntime:
     def cancel_transfer(self, transfer_id: str) -> None:
         if self._service is not None:
             self._submit(self._service.cancel_transfer(transfer_id))
+
+    def enable_input_helper(self) -> None:
+        request_helper_install(str(_current_executable()))
+
+    def repair_input_helper(self) -> None:
+        request_helper_install(str(_current_executable()))
+
+    def remove_input_helper(self) -> None:
+        request_helper_remove(str(_current_executable()))
 
     def remember_close_choice(self, choice: CloseChoice | None) -> None:
         try:
@@ -282,6 +322,7 @@ class _ConfiguredRuntime:
                 slot_status=self._slot_status,
                 pairing_decider=self._decide_pairing,
                 transfer_status=self._transfer_status,
+                helper_status=self._helper_status,
                 overwrite_decider=self._decide_overwrite,
             )
             try:
@@ -310,6 +351,11 @@ class _ConfiguredRuntime:
 
     def _transfer_status(self, status: FileTransferStatus) -> None:
         callback = self._transfer_status_callback
+        if callback is not None:
+            callback(status)
+
+    def _helper_status(self, status: HelperStatus) -> None:
+        callback = self._helper_status_callback
         if callback is not None:
             callback(status)
 
@@ -352,17 +398,83 @@ def diagnose() -> dict[str, object]:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    enable_per_monitor_v2()
     parser = argparse.ArgumentParser(prog="LanInputShare")
     parser.add_argument("--diagnose", action="store_true", help="输出只读诊断并退出")
     parser.add_argument("--minimized", action="store_true", help="仅显示托盘图标")
     parser.add_argument("--gui-smoke-test", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--install-input-helper", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--remove-input-helper", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--input-helper-status", action="store_true", help=argparse.SUPPRESS)
     arguments = parser.parse_args(list(argv) if argv is not None else None)
+    maintenance = sum(
+        bool(value)
+        for value in (
+            arguments.install_input_helper,
+            arguments.remove_input_helper,
+            arguments.input_helper_status,
+        )
+    )
+    if maintenance > 1:
+        parser.error("input-helper maintenance options are mutually exclusive")
+    if maintenance:
+        return _run_input_helper_maintenance(arguments)
     if arguments.diagnose:
         print(json.dumps(diagnose(), ensure_ascii=False, indent=2))
         return 0
     if arguments.gui_smoke_test:
         return _run_gui_smoke_test()
     return _run_gui(minimized=bool(arguments.minimized))
+
+
+def _current_executable() -> Path:
+    executable = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
+    return Path(executable).resolve()
+
+
+def _run_input_helper_maintenance(arguments: argparse.Namespace) -> int:
+    main_exe = _current_executable()
+    helper_source = main_exe.with_name(INPUT_HELPER_EXE_NAME)
+    manager = InputHelperManager()
+    if arguments.input_helper_status:
+        status = manager.status(main_exe, helper_source)
+        print(
+            json.dumps(
+                {
+                    "state": status.state.value,
+                    "installed_path": (
+                        str(status.installed_path) if status.installed_path else None
+                    ),
+                    "detail": status.detail,
+                },
+                ensure_ascii=False,
+            )
+        )
+        return 0
+    if not is_elevated():
+        print("安装或移除高权限输入助手需要管理员权限", file=sys.stderr)
+        return 2
+    if arguments.install_input_helper:
+        try:
+            manager.install(main_exe, helper_source)
+            manager.start()
+        except Exception as exc:
+            _show_helper_maintenance_error("增强控制安装失败", exc)
+            return 1
+    else:
+        try:
+            manager.remove()
+        except Exception as exc:
+            _show_helper_maintenance_error("增强控制移除失败", exc)
+            return 1
+    return 0
+
+
+def _show_helper_maintenance_error(title: str, error: Exception) -> None:
+    message = f"{title}，请返回主程序后重试。\n\n{error}"
+    print(message, file=sys.stderr)
+    if getattr(sys, "frozen", False):
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
 
 
 def _run_gui_smoke_test() -> int:
@@ -419,6 +531,7 @@ def _run_gui(*, minimized: bool) -> int:
     runtime.set_overwrite_callback(view_model.decide_overwrite)
     runtime.set_slot_status_callback(view_model.update_slot_status)
     runtime.set_transfer_status_callback(view_model.update_transfer_status)
+    runtime.set_helper_status_callback(view_model.update_helper_status)
     view_model.transfer_changed.connect(transfer_popup.update_transfer)
     try:
         config = store.load()

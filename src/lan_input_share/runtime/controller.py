@@ -6,13 +6,11 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import replace
 from typing import Protocol
 
+from lan_input_share.input.codec import decode_input_event, encode_input_event
 from lan_input_share.input.events import (
     InputEvent,
     KeyEvent,
-    MouseButton,
-    MouseButtonEvent,
     MouseMoveEvent,
-    MouseWheelEvent,
     Point,
     Suppression,
 )
@@ -26,7 +24,6 @@ from lan_input_share.network.session import (
 )
 from lan_input_share.protocol.messages import (
     InputMessage,
-    JsonValue,
     ReleaseInputMessage,
     WireMessage,
 )
@@ -402,6 +399,7 @@ def _is_post_warp_motion(position: Point, anchor: Point) -> bool:
     return abs(position.x - anchor.x) <= x_limit and abs(position.y - anchor.y) <= y_limit
 
 
+<<<<<<< HEAD
 def encode_input_event(event: InputEvent) -> dict[str, JsonValue]:
     common: dict[str, JsonValue] = {
         "injected": event.injected,
@@ -509,4 +507,6 @@ def _string(value: JsonValue) -> str:
     return value
 
 
+=======
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
 __all__ = ["ControllerRuntime", "decode_input_event", "encode_input_event"]

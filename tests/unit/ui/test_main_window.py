@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QGroupBox, QMessageBox, QPushButton
 
 from lan_input_share.core.models import DeviceRole, ScreenPosition
+from lan_input_share.elevated.models import HelperState, HelperStatus
+from lan_input_share.network.adapters import AdapterInfo
 from lan_input_share.ui.close_behavior import CloseChoice, build_close_dialog
 from lan_input_share.ui.cross_layout_editor import CrossLayoutEditor
 from lan_input_share.ui.main_window import MainWindow
@@ -17,6 +20,7 @@ class FakeRuntime:
         self.shutdowns = 0
         self.close_choices: list[CloseChoice | None] = []
         self.configured = []
+        self.helper_actions: list[str] = []
 
     def cancel_transfer(self, transfer_id: str) -> None:
         self.cancelled.append(transfer_id)
@@ -29,6 +33,15 @@ class FakeRuntime:
 
     def configure(self, config) -> None:  # type: ignore[no-untyped-def]
         self.configured.append(config)
+
+    def enable_input_helper(self) -> None:
+        self.helper_actions.append("enable")
+
+    def repair_input_helper(self) -> None:
+        self.helper_actions.append("repair")
+
+    def remove_input_helper(self) -> None:
+        self.helper_actions.append("remove")
 
 
 @pytest.fixture(autouse=True)
@@ -104,6 +117,84 @@ def test_controller_shows_cross_editor_and_client_hides_position_fields(qtbot) -
     assert not window.cross_editor.isVisible()
     assert window.client_settings_box.isVisible()
     assert window.findChild(CrossLayoutEditor, "crossLayoutEditor") is not None
+
+
+def test_client_helper_row_explains_uac_and_secure_desktop(qtbot) -> None:  # type: ignore[no-untyped-def]
+    runtime = FakeRuntime()
+    view_model = AppViewModel(runtime)
+    window = MainWindow(view_model)
+    qtbot.addWidget(window)
+    window.show()
+
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CLIENT))
+    assert window.helper_status_label.isVisible()
+    assert "UAC" in window.helper_explanation_label.text()
+    assert "本机确认" in window.helper_explanation_label.text()
+    window.helper_enable_button.click()
+    assert runtime.helper_actions == ["enable"]
+
+    view_model.update_helper_status(
+        HelperStatus(HelperState.REPAIR_REQUIRED, "version mismatch")
+    )
+    assert window.helper_repair_button.isVisible()
+    window.helper_repair_button.click()
+    assert runtime.helper_actions[-1] == "repair"
+
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CONTROLLER))
+    assert not window.client_settings_box.isVisible()
+
+
+def test_client_panel_shows_the_selected_physical_lan_ip(
+    qtbot, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    adapters = (
+        AdapterInfo("Clash", "Clash", 1, "198.18.0.1", True, 1),
+        AdapterInfo("Wi-Fi", "Wi-Fi", 9, "192.168.31.129", True, 9),
+        AdapterInfo("Ethernet", "Ethernet", 5, "192.168.31.88", True, 5),
+    )
+    monkeypatch.setattr(
+        "lan_input_share.ui.main_window.list_adapters",
+        lambda: adapters,
+        raising=False,
+    )
+    window = MainWindow(AppViewModel(FakeRuntime()))
+    qtbot.addWidget(window)
+    window.show()
+
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CLIENT))
+    window.adapter_combo.setCurrentIndex(window.adapter_combo.findData("auto"))
+
+    assert window.client_ip_label.text() == "192.168.31.88"
+    assert window.client_ip_label.textInteractionFlags() & (
+        Qt.TextInteractionFlag.TextSelectableByMouse
+    )
+    assert window.client_ip_label.isVisible()
+
+    window.adapter_combo.setEditText("Wi-Fi")
+    assert window.client_ip_label.text() == "192.168.31.129"
+
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CONTROLLER))
+    assert not window.client_ip_label.isVisible()
+
+
+def test_client_panel_explains_when_no_physical_lan_ip_is_available(
+    qtbot, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    adapters = (
+        AdapterInfo("Clash", "Clash", 1, "198.18.0.1", True, 1),
+    )
+    monkeypatch.setattr(
+        "lan_input_share.ui.main_window.list_adapters",
+        lambda: adapters,
+        raising=False,
+    )
+    window = MainWindow(AppViewModel(FakeRuntime()))
+    qtbot.addWidget(window)
+
+    window.role_combo.setCurrentIndex(window.role_combo.findData(DeviceRole.CLIENT))
+    window.adapter_combo.setCurrentIndex(window.adapter_combo.findData("auto"))
+
+    assert window.client_ip_label.text() == "未检测到可用的局域网 IP"
 
 
 def test_moving_connected_peer_applies_layout_without_global_save(qtbot) -> None:  # type: ignore[no-untyped-def]

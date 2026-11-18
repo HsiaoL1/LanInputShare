@@ -35,6 +35,22 @@ _STATUS_LABELS = {
     "identity_mismatch": "设备身份不匹配",
 }
 
+_CAPABILITY_STATUS_LABELS = {
+    "标准控制": "标准",
+    "增强控制可用": "增强",
+    "安全桌面，远程输入暂停": "安全桌面",
+    "增强控制暂不可用": "暂不可用",
+    "增强控制需要修复": "需修复",
+}
+
+
+def _compact_status(status: str) -> str:
+    status_label = _STATUS_LABELS.get(status)
+    if status_label is not None:
+        return status_label
+    summary = status.split("：", 1)[0]
+    return _CAPABILITY_STATUS_LABELS.get(summary, summary)
+
 
 class CrossLayoutEditor(QWidget):
     layout_changed = Signal()
@@ -241,15 +257,19 @@ class CrossLayoutEditor(QWidget):
 
     def _refresh(self) -> None:
         for position, button in self._buttons.items():
-            lines = [_POSITION_LABELS[position]]
             if position is self._local_position:
+                lines = [_POSITION_LABELS[position]]
                 lines.append("本机")
             elif position in self._peers:
-                lines.append(self._peers[position][0])
                 details = self._slot_details.get(position)
-                if details is not None:
-                    status = _STATUS_LABELS.get(details[1], details[1])
+                if details is None:
+                    lines = [_POSITION_LABELS[position], self._peers[position][0]]
+                else:
+                    lines = [self._peers[position][0]]
+                    status = _compact_status(details[1])
                     lines.append(f"{details[0]} · {status}")
+            else:
+                lines = [_POSITION_LABELS[position]]
             button.setText("\n".join(lines))
 
 

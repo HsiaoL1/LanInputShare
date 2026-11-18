@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import os
 import shutil
 import ssl
 import sys
@@ -35,9 +36,27 @@ from lan_input_share.core.models import (
     ScreenInfo,
     ScreenPosition,
 )
+<<<<<<< HEAD
 from lan_input_share.input.events import KeyEvent
+=======
+from lan_input_share.elevated.client import HelperInputBridge
+from lan_input_share.elevated.models import (
+    HELPER_PROTOCOL_VERSION,
+    ApprovedClient,
+    HelperState,
+    HelperStatus,
+)
+from lan_input_share.input.events import InputEvent, KeyEvent
+from lan_input_share.input.routed_injector import (
+    RoutedInputInjector,
+    StaticHelperInput,
+)
+from lan_input_share.input.win32_cursor import Win32CursorController
+from lan_input_share.input.win32_hook import Win32InputHook
+from lan_input_share.input.win32_injector import Win32InputInjector
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
 from lan_input_share.logging_setup import sanitize_transfer_error
-from lan_input_share.network.adapters import choose_adapters, list_adapters
+from lan_input_share.network.adapters import list_adapters, selected_ipv4
 from lan_input_share.network.backoff import ExponentialBackoff
 from lan_input_share.network.connection import (
     SessionCallbacks,
@@ -68,6 +87,7 @@ from lan_input_share.protocol.messages import (
     FilePasteDecisionMessage,
     FilePasteProbeMessage,
     FileRequestMessage,
+    InputCapabilityMessage,
     JsonValue,
     WireMessage,
 )
@@ -106,12 +126,18 @@ from lan_input_share.transfer.windows_destination import (
     ResolvedDestination,
 )
 from lan_input_share.transfer.wire import manifest_from_payload, manifest_to_payload
+from lan_input_share.windows.input_helper_install import (
+    INPUT_HELPER_EXE_NAME,
+    InputHelperManager,
+)
+from lan_input_share.windows.process_identity import inspect_process_identity
 
 _LOGGER = logging.getLogger("lan_input_share.runtime")
 
 type StatusCallback = Callable[[str], None]
 type SlotStatusCallback = Callable[[ScreenPosition, str, str], None]
 type TransferStatusCallback = Callable[[FileTransferStatus], None]
+type HelperStatusCallback = Callable[[HelperStatus], None]
 type OverwriteDecider = Callable[[OverwritePromptRequest], Awaitable[PasteDecision]]
 
 _FILE_MARKER_PREFIX = "lan-input-share-files:"
@@ -119,6 +145,21 @@ _FILE_RATE_LIMIT_BYTES_PER_SECOND = 4 * 1024 * 1024
 _FILE_NETWORK_UTILIZATION = 0.75
 _CLIPBOARD_IMAGE_CHUNK_SIZE = 32 * 1024
 _MAX_CLIPBOARD_IMAGE_BYTES = 64 * 1024 * 1024
+
+
+class ManagedHelperInput(Protocol):
+    @property
+    def status(self) -> HelperStatus: ...
+
+    def add_status_callback(self, callback: HelperStatusCallback) -> None: ...
+
+    def inject(self, event: InputEvent) -> None: ...
+
+    def release_all(self, events: tuple[InputEvent, ...]) -> None: ...
+
+    def start(self) -> None: ...
+
+    def stop(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +338,8 @@ class NetworkRoleService:
         overwrite_decider: OverwriteDecider | None = None,
         destination_resolver: DestinationResolver | None = None,
         overwrite_timeout: float = 300.0,
+        helper_factory: Callable[[], ManagedHelperInput] | None = None,
+        helper_status: HelperStatusCallback | None = None,
     ) -> None:
         if transfer_progress_delay < 0 or transfer_progress_interval < 0:
             raise ValueError("文件传输进度时间参数不能为负数")
@@ -314,6 +357,8 @@ class NetworkRoleService:
         self._overwrite_decider = overwrite_decider or _cancel_overwrite
         self._destination_resolver = destination_resolver or create_destination_resolver()
         self._overwrite_timeout = overwrite_timeout
+        self._helper_factory = helper_factory or _create_default_helper_input
+        self._helper_status = helper_status or (lambda _status: None)
         self._preflight = PastePreflightService()
         self._identity: DeviceIdentity | None = None
         self._local_device: DeviceInfo | None = None
@@ -321,6 +366,10 @@ class NetworkRoleService:
         self._controller_runtime: ControllerRuntime | None = None
         self._client_runtime: ClientRuntime | None = None
         self._client_session: ControlSession | None = None
+        self._helper_input: ManagedHelperInput | None = None
+        self._client_injector: RoutedInputInjector | None = None
+        self._latest_helper_status: HelperStatus | None = None
+        self._last_sent_capability: str | None = None
         self._controller_sessions: dict[PeerTarget, ControlSession] = {}
         self._pairing: PairingCoordinator | None = None
         self._tasks: list[asyncio.Task[None]] = []
@@ -362,7 +411,15 @@ class NetworkRoleService:
         ensure_permissions(self._config.role)
         self._stop.clear()
         self._loop = asyncio.get_running_loop()
+<<<<<<< HEAD
         self._identity = DeviceIdentity.load_or_create(self._paths, self._config.device_name)
+=======
+        if self._config.role is DeviceRole.CLIENT:
+            self._ensure_client_input()
+        self._identity = DeviceIdentity.load_or_create(
+            self._paths, self._config.device_name
+        )
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
         self._pairing = PairingCoordinator(self._identity, self._trust_store)
         self._local_device = DeviceInfo(
             self._identity.device_id,
@@ -442,6 +499,10 @@ class NetworkRoleService:
         if self._client_runtime is not None:
             await self._client_runtime.stop()
             self._client_runtime = None
+        if self._helper_input is not None:
+            self._helper_input.stop()
+            self._helper_input = None
+            self._client_injector = None
         sessions = [*self._controller_sessions.values()]
         if self._client_session is not None:
             sessions.append(self._client_session)
@@ -669,6 +730,7 @@ class NetworkRoleService:
             _LOGGER.exception("slot status callback failed")
 
     async def _accept_controller_session(self, session: ControlSession) -> None:
+        self._ensure_client_input()
         previous = self._client_session
         if (
             previous is not None
@@ -696,16 +758,66 @@ class NetworkRoleService:
                 except Exception as exc:
                     self._status(f"旧连接清理失败：{sanitize_transfer_error(str(exc))}")
         self._client_session = session
+        assert self._client_injector is not None
         runtime = ClientRuntime(
             session,
+<<<<<<< HEAD
             create_injector(),
+=======
+            self._client_injector,
+>>>>>>> bf78ad01079c729b515ba8e1228a66df024f61f2
             message_handler=self._client_message,
         )
         self._client_runtime = runtime
         await runtime.start()
+        self._last_sent_capability = None
+        if self._latest_helper_status is not None:
+            await self._send_input_capability(self._latest_helper_status)
         assert session.peer is not None
         self._status(f"已连接主控 {session.peer.name}")
         self._tasks.append(asyncio.create_task(self._watch_client_session(session)))
+
+    def _ensure_client_input(self) -> None:
+        if self._helper_input is not None:
+            return
+        helper = self._helper_factory()
+        routed = RoutedInputInjector(
+            Win32InputInjector(),
+            helper,
+            status_callback=self._safe_helper_status,
+        )
+        self._helper_input = helper
+        self._client_injector = routed
+        helper.start()
+
+    def _safe_helper_status(self, status: HelperStatus) -> None:
+        self._latest_helper_status = status
+        try:
+            self._helper_status(status)
+        except Exception:
+            _LOGGER.exception("helper status callback failed")
+        loop = self._loop
+        if loop is not None and self._client_session is not None:
+            loop.call_soon_threadsafe(
+                lambda: asyncio.create_task(self._send_input_capability(status))
+            )
+
+    async def _send_input_capability(self, status: HelperStatus) -> None:
+        session = self._client_session
+        if session is None:
+            return
+        mode = _capability_mode(status.state)
+        if mode == self._last_sent_capability:
+            return
+        await session.send(
+            InputCapabilityMessage(
+                session.session_id,
+                self._wire_sequence,
+                {"mode": mode, "detail": status.detail},
+            )
+        )
+        self._wire_sequence += 1
+        self._last_sent_capability = mode
 
     async def _watch_client_session(self, session: ControlSession) -> None:
         await session.wait_closed()
@@ -714,6 +826,7 @@ class NetworkRoleService:
         runtime = self._client_runtime
         self._client_session = None
         self._client_runtime = None
+        self._last_sent_capability = None
         cleanup_errors: list[Exception] = []
         if session.peer is not None:
             try:
@@ -876,6 +989,9 @@ class NetworkRoleService:
         await self._apply_clipboard_actions(coordinator.local_changed(item))
 
     async def _controller_message(self, _device_id: str, message: WireMessage) -> None:
+        if isinstance(message, InputCapabilityMessage):
+            self._receive_input_capability(_device_id, message)
+            return
         if isinstance(message, FileOfferMessage):
             await self._receive_file_offer(_device_id, message)
             return
@@ -898,6 +1014,29 @@ class NetworkRoleService:
         self._file_offer = None
         self._completed_file_targets.clear()
         await self._receive_clipboard_message(_device_id, message)
+
+    def _receive_input_capability(
+        self,
+        device_id: str,
+        message: InputCapabilityMessage,
+    ) -> None:
+        mode = str(message.payload["mode"])
+        detail = str(message.payload["detail"])
+        label = {
+            "standard": "标准控制",
+            "elevated": "增强控制可用",
+            "secure_desktop": "安全桌面，远程输入暂停",
+            "unavailable": "增强控制暂不可用",
+            "repair_required": "增强控制需要修复",
+        }[mode]
+        if detail:
+            label = f"{label}：{detail}"
+        for target, session in self._controller_sessions.items():
+            peer = session.peer
+            if peer is not None and peer.device_id == device_id:
+                self._safe_slot_status(target.position, peer.name, label)
+                self._safe_status(f"客户端 {target.host} 输入能力：{label}")
+                return
 
     async def _client_message(self, message: WireMessage) -> None:
         assert self._client_session is not None and self._client_session.peer is not None
@@ -1885,8 +2024,7 @@ def _primary_screen() -> ScreenInfo:
 def _selected_bind_ip(config: AppConfig) -> str | None:
     if config.bind_ip:
         return config.bind_ip
-    selected = choose_adapters(list_adapters(), config.adapter_id)
-    return selected[0].ipv4 if selected else None
+    return selected_ipv4(list_adapters(), config.adapter_id)
 
 
 def _item_from_marker(marker: str, text: str) -> ClipboardItem | None:
@@ -2024,6 +2162,52 @@ def _clipboard_item_from_message(message: ClipboardMessage) -> ClipboardItem | N
     except ValueError:
         return None
     return item if item.digest == digest else None
+
+
+def _create_default_helper_input() -> ManagedHelperInput:
+    executable = (
+        Path(sys.executable).resolve()
+        if getattr(sys, "frozen", False)
+        else Path(sys.argv[0]).resolve()
+    )
+    helper_source = executable.with_name(INPUT_HELPER_EXE_NAME)
+    manager = InputHelperManager()
+    status = manager.status(executable, helper_source)
+    try:
+        identity = inspect_process_identity(os.getpid())
+        approved = ApprovedClient(
+            path=identity.path,
+            sha256=identity.sha256,
+            user_sid=identity.user_sid,
+            protocol_version=HELPER_PROTOCOL_VERSION,
+        )
+    except (OSError, ValueError) as exc:
+        return StaticHelperInput(
+            HelperStatus(HelperState.UNAVAILABLE, f"无法识别主程序身份：{exc}")
+        )
+
+    def installation_status() -> HelperStatus:
+        current = manager.status(executable, helper_source)
+        return HelperStatus(current.state, current.detail)
+
+    return HelperInputBridge(
+        approved,
+        initial_status=HelperStatus(status.state, status.detail),
+        installation_status=installation_status,
+        ensure_started=manager.start,
+    )
+
+
+def _capability_mode(state: HelperState) -> str:
+    if state is HelperState.RUNNING:
+        return "elevated"
+    if state is HelperState.SECURE_DESKTOP:
+        return "secure_desktop"
+    if state is HelperState.REPAIR_REQUIRED:
+        return "repair_required"
+    if state in {HelperState.NOT_INSTALLED, HelperState.DISABLED}:
+        return "standard"
+    return "unavailable"
 
 
 __all__ = [
